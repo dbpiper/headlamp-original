@@ -1,38 +1,36 @@
-# Headlamp
+# Headlamp CLI
 
-Coverage-first, runner-agnostic test UX for Jest. Headlamp delegates test execution to your existing runner and focuses on clearer selection and better coverage insights.
+Coverage-first, runner-agnostic test UX for Jest/Vitest. Delegates execution to your runner, focuses on better selection and coverage insights.
 
 ## Install
 
-```bash
-npm i -D headlamp
-```
+Only in /Users/david/src/headlamp/src/lib: PLACEHOLDER
+Only in /Users/david/src/headlamp/src/lib: _exec.ts
+Files /Users/david/src/gigworx-node/scripts/cli/coverage-print.ts and /Users/david/src/headlamp/src/lib/coverage-print.ts differ
+Files /Users/david/src/gigworx-node/scripts/cli/discovery.ts and /Users/david/src/headlamp/src/lib/discovery.ts differ
+Only in /Users/david/src/headlamp/src/lib: env-utils.ts
+Only in /Users/david/src/headlamp/src/lib: fast-related.ts
+Files /Users/david/src/gigworx-node/scripts/cli/graph-distance.ts and /Users/david/src/headlamp/src/lib/graph-distance.ts differ
+Files /Users/david/src/gigworx-node/scripts/cli/index.ts and /Users/david/src/headlamp/src/lib/index.ts differ
+Files /Users/david/src/gigworx-node/scripts/cli/program.ts and /Users/david/src/headlamp/src/lib/program.ts differ
 
-## Quick start
+## Usage
 
-```bash
-npx headlamp --coverage [jest args]
-```
+removed
+removed
 
-- Uses your local Jest install; pass your normal flags after `headlamp`
-- Renders improved coverage tables and hotspots in the terminal
-- Select files via CLI args; Headlamp smartly chooses tests to run and what coverage to show
+- Delegates to your local Jest/Vitest install
+- Renders improved coverage tables and hotspots
+- Selects tests by import-graph when you pass production paths
 
-## Features
+## Why
 
-- Coverage-first terminal UI: per-file summaries, hotspots, missed functions/branches, editor links
-- Intelligent selection:
-  - Provide production paths; Headlamp finds direct tests by import graph
-  - Falls back to resilient discovery when Jest listing times out
-- Alias-aware import resolution: tsconfig/jsconfig paths, Jest moduleNameMapper, Babel module-resolver, Metro extraNodeModules
-- Zero lock-in: delegates to Jest; Vitest support is planned but not required to use coverage UI
+- Keep Jest/Vitest as-is. Get a better UI/UX for coverage and selection.
 
-## CLI flags (selected)
+## Status
 
-- `--coverage`: enable coverage collection and UI
-- `--coverage-ui=jest|both`: choose minimal (jest) or extended (both) coverage UI
-- `--coverage.detail=<n|all|auto>`: deep-dive per-file hotspots (n = count)
-- `--coverage.showCode=true|false`: show snippet around hotspots
+Alpha. API/CLI flags may change.
+und hotspots
 - `--coverage.mode=compact|full|auto`: compact table vs full per-file details
 - `--coverage.maxFiles`, `--coverage.maxHotspots`: limit rows to fit your terminal
 - `--coverage.pageFit=true|false`: adapt output to terminal rows

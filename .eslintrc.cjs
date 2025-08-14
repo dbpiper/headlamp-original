@@ -212,6 +212,7 @@ module.exports = {
   ],
   parserOptions: {
     project: './tsconfig.json',
+    tsconfigRootDir: __dirname,
   },
   env: {
     node: true,
@@ -219,12 +220,14 @@ module.exports = {
     es2022: true,
   },
   settings: {
+    'import/core-modules': ['node:fs', 'node:fs/promises', 'node:path', 'node:os'],
     'import/parsers': {
       '@typescript-eslint/parser': ['.ts', '.tsx'],
     },
     'import/resolver': {
       typescript: {
         alwaysTryTypes: true,
+        project: './tsconfig.json',
       },
       node: { extensions: ['.js', '.mjs', '.ts', '.tsx', '.d.ts'] },
     },
@@ -232,10 +235,7 @@ module.exports = {
   plugins: ['import', '@typescript-eslint', 'promise', 'node-import'],
   overrides: [
     {
-      files: [
-        '**/*.{test,spec}.{js,ts,tsx}',
-        'tests/**/*.{js,ts,tsx}'
-      ],
+      files: ['**/*.{test,spec}.{js,ts,tsx}', 'tests/**/*.{js,ts,tsx}'],
       parserOptions: {
         project: null,
       },

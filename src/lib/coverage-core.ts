@@ -1,14 +1,10 @@
 /* eslint-disable import/no-extraneous-dependencies */
 import * as fs from 'node:fs/promises';
-import { createRequire } from 'node:module';
+
+import picomatch from 'picomatch';
+import { createCoverageMap } from 'istanbul-lib-coverage';
 
 import { relativizeForMatch } from './paths';
-
-const require = createRequire(import.meta.url);
-
-const { createCoverageMap } =
-  // eslint-disable-next-line import/no-extraneous-dependencies
-  require('istanbul-lib-coverage') as typeof import('istanbul-lib-coverage');
 
 export const readCoverageJson = async (jsonPath: string) => {
   try {
@@ -32,9 +28,7 @@ export const filterCoverageMap = (
     readonly selectionSpecified: boolean;
   },
 ) => {
-  // local picomatch import to avoid circulars
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const picomatchFn = require('picomatch') as unknown as (
+  const picomatchFn = picomatch as unknown as (
     globs: string | readonly string[],
     options?: { readonly nocase?: boolean; readonly dot?: boolean },
   ) => (str: string) => boolean;
