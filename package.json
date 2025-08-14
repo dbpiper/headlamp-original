@@ -11,16 +11,20 @@
   },
   "files": [
     "dist",
-    "dist-types"
+    "dist-types",
+    "scripts"
   ],
   "scripts": {
     "build": "node ./scripts/build.mjs",
+    "postinstall": "node ./scripts/postinstall.mjs",
     "prepublishOnly": "npm run build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "release": "npm publish --access public"
+    "release": "npm publish --access public",
+    "build:yalc": "npm run build && npx yalc publish && node ./scripts/print-publish-log.mjs",
+    "dev:yalc": "nodemon -w src -e ts,tsx,js,jsx -d 700ms -x \"npm run build:yalc\""
   },
   "keywords": [
     "testing",
@@ -43,6 +47,7 @@
     "vitest": "*"
   },
   "devDependencies": {
+    "nodemon": "^3.1.10",
     "@types/istanbul-reports": "^3.0.4",
     "@types/picomatch": "^4.0.2",
     "@typescript-eslint/eslint-plugin": "^8.37.0",
@@ -58,6 +63,7 @@
     "eslint-plugin-promise": "^6.1.1",
     "prettier": "^3.3.3",
     "tslib": "^2.6.3",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "yalc": "^1.0.0-pre.53"
   }
 }

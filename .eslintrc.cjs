@@ -235,6 +235,12 @@ module.exports = {
   plugins: ['import', '@typescript-eslint', 'promise', 'node-import'],
   overrides: [
     {
+      files: ['scripts/**/*.{js,mjs,cjs}'],
+      parserOptions: {
+        project: null,
+      },
+    },
+    {
       files: ['**/*.{test,spec}.{js,ts,tsx}', 'tests/**/*.{js,ts,tsx}'],
       parserOptions: {
         project: null,

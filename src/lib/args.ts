@@ -19,7 +19,10 @@ export type Action =
   | { readonly type: 'coverageMode'; readonly value: 'compact' | 'full' }
   | { readonly type: 'coverageMaxFiles'; readonly value: number }
   | { readonly type: 'coverageMaxHotspots'; readonly value: number }
-  | { readonly type: 'coveragePageFit'; readonly value: boolean };
+  | { readonly type: 'coveragePageFit'; readonly value: boolean }
+  | { readonly type: 'changed'; readonly value: ChangedMode };
+
+export type ChangedMode = 'all' | 'staged' | 'unstaged';
 
 export const ActionBuilders = {
   coverage: (coverageValue: boolean): Action => ({ type: 'coverage', coverageValue }),
@@ -42,6 +45,7 @@ export const ActionBuilders = {
   coverageMaxFiles: (value: number): Action => ({ type: 'coverageMaxFiles', value }),
   coverageMaxHotspots: (value: number): Action => ({ type: 'coverageMaxHotspots', value }),
   coveragePageFit: (value: boolean): Action => ({ type: 'coveragePageFit', value }),
+  changed: (value: ChangedMode): Action => ({ type: 'changed', value }),
 } as const;
 
 type State = { actions: Action[]; skipNext: boolean };
@@ -272,6 +276,21 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
       step([ActionBuilders.coverageRoot((value.split('=')[1] ?? '').trim())]),
     ),
 
+    // --changed flag: selects changed files via git (all|staged|unstaged)
+    rule.eq('--changed', () => step([ActionBuilders.changed('all')])),
+    rule.startsWith('--changed=', (value) => {
+      const raw = (value.split('=')[1] ?? '').trim().toLowerCase();
+      const mode: ChangedMode =
+        raw === 'staged' ? 'staged' : raw === 'unstaged' ? 'unstaged' : 'all';
+      return step([ActionBuilders.changed(mode)]);
+    }),
+    rule.withLookahead('--changed', (_flag, lookahead) => {
+      const raw = String(lookahead).trim().toLowerCase();
+      const mode: ChangedMode =
+        raw === 'staged' ? 'staged' : raw === 'unstaged' ? 'unstaged' : 'all';
+      return step([ActionBuilders.changed(mode)], true);
+    }),
+
     rule.withLookahead('-t', (flag, lookahead) =>
       step(
         [
@@ -363,6 +382,7 @@ export type ParsedArgs = {
   readonly coverageMaxFiles?: number;
   readonly coverageMaxHotspots?: number;
   readonly coveragePageFit: boolean;
+  readonly changed?: ChangedMode;
 };
 
 type Contrib = {
@@ -383,6 +403,7 @@ type Contrib = {
   readonly coverageMaxFiles?: number;
   readonly coverageMaxHotspots?: number;
   readonly coveragePageFit?: boolean;
+  readonly changed?: ChangedMode;
 };
 
 const emptyContrib: Contrib = {
@@ -429,6 +450,8 @@ const toContrib = (action: Action): Contrib => {
       return { vitest: [], jest: [], coverage: false, coverageMaxHotspots: action.value };
     case 'coveragePageFit':
       return { vitest: [], jest: [], coverage: false, coveragePageFit: action.value };
+    case 'changed':
+      return { vitest: [], jest: [], coverage: false, changed: action.value };
     case 'jestArg':
       return { vitest: [], jest: [action.value], coverage: false };
     case 'vitestArg':
@@ -469,6 +492,9 @@ export const combineContrib = (left: Contrib, right: Contrib): Contrib => {
   }
   return {
     ...next,
+    ...(right.changed !== undefined || left.changed !== undefined
+      ? { changed: right.changed ?? left.changed }
+      : {}),
     ...(right.coverageAbortOnFailure !== undefined || left.coverageAbortOnFailure !== undefined
       ? { coverageAbortOnFailure: right.coverageAbortOnFailure ?? left.coverageAbortOnFailure }
       : {}),
@@ -593,6 +619,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
     coveragePageFit,
     ...(contrib.editorCmd !== undefined ? { editorCmd: contrib.editorCmd } : {}),
     ...(contrib.workspaceRoot !== undefined ? { workspaceRoot: contrib.workspaceRoot } : {}),
+    ...(contrib.changed !== undefined ? { changed: contrib.changed } : {}),
   };
   return out;
 };

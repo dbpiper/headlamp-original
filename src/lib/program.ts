@@ -366,16 +366,64 @@ export const program = async (): Promise<void> => {
     coverageMaxFiles: coverageMaxFilesArg,
     coverageMaxHotspots: coverageMaxHotspotsArg,
     coveragePageFit,
+    changed,
   } = deriveArgs(argv);
-  console.info(`Selection → specified=${selectionSpecified} paths=${selectionPaths.length}`);
+  // Derive changed-file selection (staged/unstaged/all) when requested
+  const getChangedFiles = async (
+    mode: 'all' | 'staged' | 'unstaged',
+    cwd: string,
+  ): Promise<readonly string[]> => {
+    const collect = async (cmd: string, args: readonly string[]) => {
+      try {
+        const out = await runText(cmd, args, {
+          cwd,
+          env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
+          timeoutMs: 4000,
+        });
+        return out
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+      } catch {
+        return [] as string[];
+      }
+    };
+    const staged =
+      mode === 'staged' || mode === 'all'
+        ? await collect('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB', '--cached'])
+        : [];
+    const unstagedTracked =
+      mode === 'unstaged' || mode === 'all'
+        ? await collect('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB'])
+        : [];
+    const untracked =
+      mode === 'unstaged' || mode === 'all'
+        ? await collect('git', ['ls-files', '--others', '--exclude-standard'])
+        : [];
+    const rels = Array.from(new Set([...staged, ...unstagedTracked, ...untracked]));
+    return rels
+      .map((rel) => path.resolve(cwd, rel).replace(/\\/g, '/'))
+      .filter((abs) => !abs.includes('/node_modules/') && !abs.includes('/coverage/'));
+  };
+  const repoRootForChanged = workspaceRoot ?? (await findRepoRoot());
+  const changedSelectionAbs = changed
+    ? await getChangedFiles(changed, repoRootForChanged)
+    : ([] as readonly string[]);
+  const selectionPathsAugmented = changedSelectionAbs.length
+    ? Array.from(new Set([...(selectionPaths as readonly string[]), ...changedSelectionAbs]))
+    : selectionPaths;
+  const selectionSpecifiedAugmented = Boolean(selectionSpecified || changedSelectionAbs.length > 0);
+  console.info(
+    `Selection → specified=${selectionSpecifiedAugmented} paths=${selectionPathsAugmented.length}`,
+  );
   const { jest } = argsForDiscovery(['run'], jestArgs);
-  const selectionLooksLikeTest = selectionPaths.some(
+  const selectionLooksLikeTest = selectionPathsAugmented.some(
     (pathText) => /\.(test|spec)\.[tj]sx?$/i.test(pathText) || /(^|\/)tests?\//i.test(pathText),
   );
-  const selectionLooksLikePath = selectionPaths.some(
+  const selectionLooksLikePath = selectionPathsAugmented.some(
     (pathText) => /[\\/]/.test(pathText) || /\.(m?[tj]sx?)$/i.test(pathText),
   );
-  const selectionHasPaths = selectionPaths.length > 0;
+  const selectionHasPaths = selectionPathsAugmented.length > 0;
   const repoRootForDiscovery = workspaceRoot ?? (await findRepoRoot());
 
   // Expand production selections from bare filenames or repo-root-relative suffixes
@@ -444,7 +492,7 @@ export const program = async (): Promise<void> => {
     return Array.from(results);
   };
 
-  const initialProdSelections = selectionPaths.filter(
+  const initialProdSelections = selectionPathsAugmented.filter(
     (pathText) =>
       (/[\\/]/.test(pathText) || /\.(m?[tj]sx?)$/i.test(pathText)) &&
       !/(^|\/)tests?\//i.test(pathText) &&
@@ -452,13 +500,13 @@ export const program = async (): Promise<void> => {
   );
   const expandedProdSelections = initialProdSelections.length
     ? initialProdSelections
-    : await expandProductionSelections(selectionPaths, repoRootForDiscovery);
+    : await expandProductionSelections(selectionPathsAugmented, repoRootForDiscovery);
   const selectionIncludesProdPaths = expandedProdSelections.length > 0;
   console.info(
     `Selection classify → looksLikePath=${selectionLooksLikePath} looksLikeTest=${selectionLooksLikeTest} prodPaths=${selectionIncludesProdPaths}`,
   );
   const stripPathTokens = (args: readonly string[]) =>
-    args.filter((token) => !selectionPaths.includes(token));
+    args.filter((token) => !selectionPathsAugmented.includes(token));
   const jestDiscoveryArgs = selectionIncludesProdPaths ? stripPathTokens(jest) : jest;
 
   const projectConfigs: string[] = [];
@@ -521,7 +569,7 @@ export const program = async (): Promise<void> => {
   const perProjectFiltered = new Map<string, string[]>();
   for (const cfg of projectConfigs) {
     const files = perProjectFiles.get(cfg) ?? [];
-    const selectionTestPaths = selectionPaths.filter(
+    const selectionTestPaths = selectionPathsAugmented.filter(
       (pathToken) =>
         /\.(test|spec)\.[tj]sx?$/i.test(pathToken) || /(^|\/)tests?\//i.test(pathToken),
     );
@@ -894,8 +942,8 @@ export const program = async (): Promise<void> => {
   }
 
   const jestDecision = decideShouldRunJest([], effectiveJestFiles, {
-    selectionSpecified,
-    selectionPaths,
+    selectionSpecified: selectionSpecifiedAugmented,
+    selectionPaths: selectionPathsAugmented,
   });
   const { shouldRunJest } = jestDecision;
   const jestCount = effectiveJestFiles.length;
@@ -958,7 +1006,7 @@ export const program = async (): Promise<void> => {
       }
       // eslint-disable-next-line no-await-in-loop
       // Ensure any explicitly selected paths (tests or production files) are included in coverage
-      const selectedFilesForCoverage = selectionPaths
+      const selectedFilesForCoverage = selectionPathsAugmented
         .filter((pathToken) => /[\\/]/.test(pathToken))
         // Avoid restricting coverage to test files when a test path is selected
         .filter((pathToken) => !looksLikeTestPath(pathToken))
@@ -1061,8 +1109,8 @@ export const program = async (): Promise<void> => {
     await mergeLcov();
     const repoRoot = workspaceRoot ?? (await findRepoRoot());
     const mergedOptsBase = {
-      selectionSpecified,
-      selectionPaths,
+      selectionSpecified: selectionSpecifiedAugmented,
+      selectionPaths: selectionPathsAugmented,
       includeGlobs,
       excludeGlobs,
       workspaceRoot: repoRoot,

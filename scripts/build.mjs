@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { rm, mkdir, writeFile } from 'node:fs/promises';
+import { rm, mkdir, writeFile, chmod } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 const root = resolve(new URL('.', import.meta.url).pathname, '..');
@@ -114,3 +114,4 @@ await build({
 const cliPath = resolve(dist, 'cli.cjs');
 const cliContent = await (await import('node:fs/promises')).readFile(cliPath, 'utf8');
 await writeFile(cliPath, `#!/usr/bin/env node\n${cliContent}`);
+await chmod(cliPath, 0o755);
