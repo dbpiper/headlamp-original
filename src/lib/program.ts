@@ -1,0 +1,1235 @@
+/* eslint-disable no-continue */
+/* eslint-disable import/no-extraneous-dependencies */
+import * as path from "node:path";
+import * as os from "node:os";
+import * as fsSync from "node:fs";
+import { createRequire } from "node:module";
+import * as fs from "node:fs/promises";
+
+import * as LibReport from "istanbul-lib-report";
+import * as Reports from "istanbul-reports";
+
+import { safeEnv } from "./env-utils";
+import { runExitCode, runText, runWithCapture } from "./_exec";
+import { deriveArgs } from "./args";
+import {
+  findRepoRoot,
+  argsForDiscovery,
+  discoverJestResilient,
+  filterCandidatesForProject,
+  decideShouldRunJest,
+} from "./discovery";
+import { readCoverageJson, filterCoverageMap } from "./coverage-core";
+import {
+  printPerFileCompositeTables,
+  printCompactCoverage,
+  printDetailedCoverage,
+} from "./coverage-print";
+import {
+  JEST_BRIDGE_REPORTER_SOURCE,
+  renderVitestFromJestJSON,
+  coerceJestJsonToBridge,
+  formatJestOutputVitest,
+} from "./jest-bridge";
+import { stripAnsiSimple } from "./stacks";
+import { tintPct } from "./bars";
+import { selectDirectTestsForProduction } from "./graph-distance";
+
+const jestBin = "./node_modules/.bin/jest";
+const babelNodeBin = "./node_modules/.bin/babel-node";
+const requireCjs = createRequire(import.meta.url);
+
+export const registerSignalHandlersOnce = () => {
+  let handled = false;
+  const on = (sig: NodeJS.Signals) => {
+    if (handled) {
+      return;
+    }
+    handled = true;
+    process.stdout.write(`\nReceived ${sig}, exiting...\n`);
+    process.exit(130);
+  };
+  process.once("SIGINT", on);
+  process.once("SIGTERM", on);
+};
+
+const isDebug = (): boolean =>
+  Boolean(
+    (process.env as unknown as { TEST_CLI_DEBUG?: string }).TEST_CLI_DEBUG
+  );
+
+export const mergeLcov = async (): Promise<void> => {
+  const jestLcovPath = "coverage/jest/lcov.info";
+  const vitestLcovPath = "coverage/vitest/lcov.info";
+  const mergedOutPath = "coverage/lcov.info";
+  const readOrEmpty = async (filePath: string) => {
+    try {
+      return await (
+        await import("node:fs/promises")
+      ).readFile(filePath, "utf8");
+    } catch {
+      return "";
+    }
+  };
+  let vitestContent = "";
+  let jestContent = "";
+  try {
+    vitestContent = await readOrEmpty(vitestLcovPath);
+  } catch (readVitestError) {
+    if (isDebug()) {
+      console.info(`read vitest lcov failed: ${String(readVitestError)}`);
+    }
+  }
+  try {
+    jestContent = await readOrEmpty(jestLcovPath);
+  } catch (readJestError) {
+    if (isDebug()) {
+      console.info(`read jest lcov failed: ${String(readJestError)}`);
+    }
+  }
+  if (!vitestContent && !jestContent) {
+    if (isDebug()) {
+      console.info("No coverage outputs found to merge.");
+    }
+    return;
+  }
+  const merged = [vitestContent.trim(), jestContent.trim()]
+    .filter(Boolean)
+    .join("\n");
+  if (merged.length > 0) {
+    await (
+      await import("node:fs/promises")
+    ).mkdir("coverage", { recursive: true });
+    await (
+      await import("node:fs/promises")
+    ).writeFile(mergedOutPath, `${merged}\n`, "utf8");
+    if (isDebug()) {
+      console.info(`Merged coverage written to ${mergedOutPath}`);
+    }
+  } else if (isDebug()) {
+    console.info("Coverage files existed but were empty; nothing to merge.");
+  }
+};
+
+export const emitMergedCoverage = async (
+  ui: "jest" | "both",
+  opts: {
+    readonly selectionSpecified: boolean;
+    readonly selectionPaths: readonly string[];
+    readonly includeGlobs: readonly string[];
+    readonly excludeGlobs: readonly string[];
+    readonly workspaceRoot?: string;
+    readonly editorCmd?: string;
+    readonly coverageDetail?: number | "all" | "auto";
+    readonly coverageShowCode?: boolean;
+    readonly coverageMode?: "compact" | "full" | "auto";
+    readonly coverageMaxFiles?: number;
+    readonly coverageMaxHotspots?: number;
+    readonly coveragePageFit?: boolean;
+    readonly executedTests?: readonly string[];
+  }
+): Promise<void> => {
+  const jestJson = path.join("coverage", "jest", "coverage-final.json");
+  const jSize = fsSync.existsSync(jestJson)
+    ? fsSync.statSync(jestJson).size
+    : -1;
+  const jestSizeLabel = jSize >= 0 ? `${jSize} bytes` : "missing";
+  if (isDebug()) {
+    console.info(`Coverage JSON probe → jest: ${jestSizeLabel}`);
+  }
+  const jestData = await readCoverageJson(jestJson);
+  const jestFilesCount = Object.keys(jestData).length;
+  if (isDebug()) {
+    console.info(`Decoded coverage entries → jest: ${jestFilesCount}`);
+  }
+  const { createCoverageMap } = requireCjs(
+    "istanbul-lib-coverage"
+  ) as typeof import("istanbul-lib-coverage");
+  const map = createCoverageMap({});
+  if (jestFilesCount > 0) {
+    try {
+      map.merge(jestData);
+    } catch (mergeJestError) {
+      console.warn(
+        `Failed merging jest coverage JSON: ${String(mergeJestError)}`
+      );
+    }
+  }
+  if (map.files().length === 0) {
+    if (isDebug()) {
+      console.info(
+        "No JSON coverage to merge; skipping merged coverage print."
+      );
+    }
+    return;
+  }
+
+  const repoRoot = opts.workspaceRoot ?? (await findRepoRoot());
+
+  let filteredMap = filterCoverageMap(map, {
+    includes: opts.includeGlobs,
+    excludes: opts.excludeGlobs,
+    root: repoRoot,
+    selectionSpecified: Boolean(opts.selectionSpecified),
+  });
+  if (filteredMap.files().length === 0) {
+    console.warn(
+      "Coverage filters matched 0 files; retrying with include=**/* to avoid empty output."
+    );
+    filteredMap = filterCoverageMap(map, {
+      includes: ["**/*"],
+      excludes: opts.excludeGlobs,
+      root: repoRoot,
+      selectionSpecified: Boolean(opts.selectionSpecified),
+    });
+    if (filteredMap.files().length === 0) {
+      console.info("Coverage present but still no matches; skipping print.");
+      return;
+    }
+  }
+
+  let changedFilesOutput: readonly string[] = [];
+
+  try {
+    const out = await runText(
+      "git",
+      ["diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD"],
+      {
+        env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
+      }
+    );
+    changedFilesOutput = out
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((filePathText) => filePathText.replace(/\\/g, "/"));
+  } catch (gitError) {
+    console.warn(
+      `git diff failed when deriving changed files: ${String(gitError)}`
+    );
+  }
+
+  await printPerFileCompositeTables({
+    map: filteredMap,
+    root: repoRoot,
+    pageFit: opts.coveragePageFit ?? Boolean(process.stdout.isTTY),
+    ...(opts.coverageMaxHotspots !== undefined
+      ? { maxHotspots: opts.coverageMaxHotspots }
+      : {}),
+    selectionPaths: opts.selectionPaths ?? [],
+    changedFiles: changedFilesOutput,
+    executedTests: opts.executedTests ?? [],
+  });
+
+  const context = LibReport.createContext({
+    dir: path.resolve("coverage", "merged"),
+    coverageMap: filteredMap,
+    defaultSummarizer: "nested",
+  });
+
+  const reporters =
+    ui === "jest"
+      ? [Reports.create("text", { file: "coverage.txt" })]
+      : [
+          Reports.create("text", { file: "coverage.txt" }),
+          Reports.create("text-summary", { file: "coverage-summary.txt" }),
+        ];
+
+  const colorizeIstanbulLine = (lineText: string): string => {
+    const separator = /^[-=\s]+$/;
+    if (separator.test(lineText.trim())) {
+      return lineText;
+    }
+    const headerLike = /\bFile\b\s*\|\s*%\s*Stmts\b/.test(lineText);
+    if (headerLike) {
+      return lineText;
+    }
+    if (/^\s*(Statements|Branches|Functions|Lines)\s*:/.test(lineText)) {
+      // Color the label, percentage, and the raw counts in parens, e.g. ( 822/1816 )
+      const updated = lineText.replace(
+        /(Statements|Branches|Functions|Lines)(\s*:\s*)(\d+(?:\.\d+)?)(%)/,
+        (_m, label, sep, num, pct) => {
+          const colorize = tintPct(Number(num));
+          return `${colorize(label)}${sep}${colorize(`${num}${pct}`)}`;
+        }
+      );
+      return updated.replace(
+        /\(\s*(\d+)\s*\/\s*(\d+)\s*\)/,
+        (_match, coveredText, totalText) => {
+          const percent = (() => {
+            const totalCount = Number(totalText);
+            const coveredCount = Number(coveredText);
+            return totalCount > 0 ? (coveredCount / totalCount) * 100 : 0;
+          })();
+          const colorize = tintPct(percent);
+          return colorize(`( ${coveredText}/${totalText} )`);
+        }
+      );
+    }
+    if (lineText.includes("|")) {
+      const parts = lineText.split("|");
+      if (parts.length >= 2) {
+        // Compute row weight from numeric percent columns
+        const numericValues: number[] = [];
+        for (let index = 1; index < parts.length - 1; index += 1) {
+          const value = Number((parts[index] ?? "").trim());
+          if (!Number.isNaN(value) && value >= 0 && value <= 100) {
+            numericValues.push(value);
+          }
+        }
+        const rowWeight = numericValues.length
+          ? Math.min(...numericValues)
+          : undefined;
+        // Tint each numeric % column
+        for (let index = 1; index < parts.length - 1; index += 1) {
+          const raw = parts[index] ?? "";
+          const value = Number(raw.trim());
+          if (!Number.isNaN(value) && value >= 0 && value <= 100) {
+            parts[index] = tintPct(value)(raw);
+          }
+        }
+        // Tint the File/Group label and Uncovered column based on row weight
+        if (rowWeight !== undefined) {
+          parts[0] = tintPct(rowWeight)(parts[0] ?? "");
+          const lastIndex = parts.length - 1;
+          if (lastIndex >= 1) {
+            parts[lastIndex] = tintPct(rowWeight)(parts[lastIndex] ?? "");
+          }
+        }
+        return parts.join("|");
+      }
+    }
+    return lineText;
+  };
+  for (const reporter of reporters) {
+    reporter.execute(context);
+  }
+  const textPath = path.resolve("coverage", "merged", "coverage.txt");
+  const summaryPath = path.resolve(
+    "coverage",
+    "merged",
+    "coverage-summary.txt"
+  );
+  const filesToPrint: string[] = [];
+  if (fsSync.existsSync(textPath)) {
+    filesToPrint.push(textPath);
+  }
+  if (fsSync.existsSync(summaryPath)) {
+    filesToPrint.push(summaryPath);
+  }
+  if (filesToPrint.length > 0) {
+    for (const filePath of filesToPrint) {
+      try {
+        const raw = fsSync.readFileSync(filePath, "utf8");
+        const colored = raw.split(/\r?\n/).map(colorizeIstanbulLine).join("\n");
+        process.stdout.write(colored.endsWith("\n") ? colored : `${colored}\n`);
+      } catch {
+        // fall back to raw printing
+        try {
+          const raw = fsSync.readFileSync(filePath, "utf8");
+          process.stdout.write(raw.endsWith("\n") ? raw : `${raw}\n`);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  } else {
+    // Fallback: no files created by reporter; run standard reporters to stdout (uncolored)
+    const stdoutReporters =
+      ui === "jest"
+        ? [Reports.create("text")]
+        : [Reports.create("text"), Reports.create("text-summary")];
+    for (const reporter of stdoutReporters) {
+      reporter.execute(context);
+    }
+  }
+
+  // Optional deep-dive per-file coverage: only when explicitly requested (not on 'auto')
+  const modeResolved: "compact" | "full" =
+    opts.coverageMode && opts.coverageMode !== "auto"
+      ? opts.coverageMode
+      : "full";
+  const shouldDeepDive =
+    opts.coverageDetail !== undefined && opts.coverageDetail !== "auto";
+  if (shouldDeepDive) {
+    if (modeResolved === "compact") {
+      await printCompactCoverage({
+        map: filteredMap,
+        root: repoRoot,
+        ...(opts.coverageMaxFiles !== undefined
+          ? { maxFiles: opts.coverageMaxFiles }
+          : {}),
+        ...(opts.coverageMaxHotspots !== undefined
+          ? { maxHotspots: opts.coverageMaxHotspots }
+          : {}),
+        ...(opts.coveragePageFit !== undefined
+          ? { pageFit: opts.coveragePageFit }
+          : {}),
+      });
+    } else {
+      const limit =
+        opts.coverageDetail === "all" ? "all" : (opts.coverageDetail as number);
+      await printDetailedCoverage({
+        map: filteredMap,
+        root: repoRoot,
+        limitPerFile: limit,
+        showCode: opts.coverageShowCode ?? Boolean(process.stdout.isTTY),
+      });
+    }
+  }
+};
+
+export const runJestBootstrap = async (): Promise<void> => {
+  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+  const code = await runExitCode(npmCmd, ["run", "-s", "test:jest:bootstrap"], {
+    env: safeEnv(process.env, {
+      NODE_ENV: "test",
+    }) as unknown as NodeJS.ProcessEnv,
+  });
+  if (Number(code) !== 0) {
+    throw new Error("Jest DB bootstrap failed");
+  }
+};
+
+export const program = async (): Promise<void> => {
+  registerSignalHandlersOnce();
+  const argv = process.argv.slice(2);
+  const {
+    jestArgs,
+    collectCoverage,
+    coverageUi,
+    coverageAbortOnFailure,
+    selectionSpecified,
+    selectionPaths,
+    includeGlobs,
+    excludeGlobs,
+    editorCmd,
+    workspaceRoot,
+    coverageDetail,
+    coverageShowCode,
+    coverageMode,
+    coverageMaxFiles: coverageMaxFilesArg,
+    coverageMaxHotspots: coverageMaxHotspotsArg,
+    coveragePageFit,
+  } = deriveArgs(argv);
+  console.info(
+    `Selection → specified=${selectionSpecified} paths=${selectionPaths.length}`
+  );
+  const { jest } = argsForDiscovery(["run"], jestArgs);
+  const selectionLooksLikeTest = selectionPaths.some(
+    (pathText) =>
+      /\.(test|spec)\.[tj]sx?$/i.test(pathText) ||
+      /(^|\/)tests?\//i.test(pathText)
+  );
+  const selectionLooksLikePath = selectionPaths.some(
+    (pathText) => /[\\/]/.test(pathText) || /\.(m?[tj]sx?)$/i.test(pathText)
+  );
+  const selectionHasPaths = selectionPaths.length > 0;
+  const repoRootForDiscovery = workspaceRoot ?? (await findRepoRoot());
+
+  // Expand production selections from bare filenames or repo-root-relative suffixes
+  const expandProductionSelections = async (
+    tokens: readonly string[],
+    repoRoot: string
+  ): Promise<readonly string[]> => {
+    const results = new Set<string>();
+    for (const raw of tokens) {
+      const token = String(raw).trim();
+      if (!token) {
+        continue;
+      }
+      const isAbs = path.isAbsolute(token);
+      const looksLikeRelPath = /[\\/]/.test(token);
+      let candidateFromRoot: string | undefined;
+      if (token.startsWith("/")) {
+        candidateFromRoot = path.join(repoRoot, token.slice(1));
+      } else if (looksLikeRelPath) {
+        candidateFromRoot = path.join(repoRoot, token);
+      } else {
+        candidateFromRoot = undefined;
+      }
+      const tryPushIfProd = (absPath: string) => {
+        const norm = path.resolve(absPath).replace(/\\/g, "/");
+        const isTest =
+          /(^|\/)tests?\//i.test(norm) || /\.(test|spec)\.[tj]sx?$/i.test(norm);
+        if (!isTest && fsSync.existsSync(norm)) {
+          results.add(norm);
+        }
+      };
+      if (isAbs && fsSync.existsSync(token)) {
+        tryPushIfProd(token);
+        continue;
+      }
+      if (candidateFromRoot && fsSync.existsSync(candidateFromRoot)) {
+        tryPushIfProd(candidateFromRoot);
+        continue;
+      }
+      // Use ripgrep to find files whose path ends with the token (filename or suffix)
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const out = await runText("rg", ["--files", "-g", `**/${token}`], {
+          cwd: repoRoot,
+          env: safeEnv(process.env, {
+            CI: "1",
+          }) as unknown as NodeJS.ProcessEnv,
+          timeoutMs: 4000,
+        });
+        const matches = out
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((rel) => path.resolve(repoRoot, rel).replace(/\\/g, "/"))
+          .filter(
+            (abs) =>
+              !abs.includes("/node_modules/") &&
+              !abs.includes("/coverage/") &&
+              !/(^|\/)tests?\//i.test(abs) &&
+              !/\.(test|spec)\.[tj]sx?$/i.test(abs)
+          );
+        matches.forEach((abs) => results.add(abs));
+      } catch {
+        // ignore
+      }
+    }
+    return Array.from(results);
+  };
+
+  const initialProdSelections = selectionPaths.filter(
+    (pathText) =>
+      (/[\\/]/.test(pathText) || /\.(m?[tj]sx?)$/i.test(pathText)) &&
+      !/(^|\/)tests?\//i.test(pathText) &&
+      !/\.(test|spec)\.[tj]sx?$/i.test(pathText)
+  );
+  const expandedProdSelections = initialProdSelections.length
+    ? initialProdSelections
+    : await expandProductionSelections(selectionPaths, repoRootForDiscovery);
+  const selectionIncludesProdPaths = expandedProdSelections.length > 0;
+  console.info(
+    `Selection classify → looksLikePath=${selectionLooksLikePath} looksLikeTest=${selectionLooksLikeTest} prodPaths=${selectionIncludesProdPaths}`
+  );
+  const stripPathTokens = (args: readonly string[]) =>
+    args.filter((token) => !selectionPaths.includes(token));
+  const jestDiscoveryArgs = selectionIncludesProdPaths
+    ? stripPathTokens(jest)
+    : jest;
+
+  const projectConfigs: string[] = [];
+  try {
+    const baseCfg = path.resolve("jest.config.js");
+    const tsCfg = path.resolve("jest.ts.config.js");
+    if (fsSync.existsSync(baseCfg)) {
+      projectConfigs.push(baseCfg);
+    }
+    if (fsSync.existsSync(tsCfg)) {
+      projectConfigs.push(tsCfg);
+    }
+  } catch (err) {
+    console.warn(`Failed to discover Jest project configs: ${String(err)}`);
+  }
+
+  const perProjectFiles = new Map<string, string[]>();
+  if (selectionIncludesProdPaths) {
+    console.info(
+      `Discovering (rg-first) → related=${selectionIncludesProdPaths} | cwd=${repoRootForDiscovery}`
+    );
+    const prodSelections = expandedProdSelections;
+    for (const cfg of projectConfigs) {
+      const cfgCwd = path.dirname(cfg);
+      // eslint-disable-next-line no-await-in-loop
+      const allTests = await discoverJestResilient(
+        [...jestDiscoveryArgs, "--config", cfg],
+        {
+          cwd: cfgCwd,
+        }
+      );
+      let directPerProject: readonly string[] = [];
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        directPerProject = await selectDirectTestsForProduction({
+          rootDir: repoRootForDiscovery,
+          testFiles: allTests,
+          productionFiles: prodSelections,
+        });
+      } catch (err) {
+        if (isDebug()) {
+          console.warn(
+            `direct selection failed for project ${path.basename(
+              cfg
+            )}: ${String(err)}`
+          );
+        }
+      }
+      perProjectFiles.set(cfg, directPerProject as string[]);
+    }
+  } else {
+    console.info(
+      `Discovering → jestArgs=${jestDiscoveryArgs.join(
+        " "
+      )} | related=${selectionIncludesProdPaths} | cwd=${repoRootForDiscovery}`
+    );
+    for (const cfg of projectConfigs) {
+      const cfgCwd = path.dirname(cfg);
+      // eslint-disable-next-line no-await-in-loop
+      const files = await discoverJestResilient(
+        [...jestDiscoveryArgs, "--config", cfg],
+        {
+          cwd: cfgCwd,
+        }
+      );
+      perProjectFiles.set(cfg, files as string[]);
+    }
+  }
+
+  const perProjectFiltered = new Map<string, string[]>();
+  for (const cfg of projectConfigs) {
+    const files = perProjectFiles.get(cfg) ?? [];
+    const selectionTestPaths = selectionPaths.filter(
+      (pathToken) =>
+        /\.(test|spec)\.[tj]sx?$/i.test(pathToken) ||
+        /(^|\/)tests?\//i.test(pathToken)
+    );
+    const candidates =
+      selectionHasPaths && selectionLooksLikeTest ? selectionTestPaths : files;
+    const absFiles = candidates
+      .map((candidatePath) =>
+        path.isAbsolute(candidatePath)
+          ? candidatePath
+          : path.join(repoRootForDiscovery, candidatePath)
+      )
+      .map((absolutePath) => absolutePath.replace(/\\/g, "/"));
+    // eslint-disable-next-line no-await-in-loop
+    const onlyOwned = await filterCandidatesForProject(
+      cfg,
+      jestDiscoveryArgs,
+      absFiles,
+      path.dirname(cfg)
+    );
+    perProjectFiltered.set(cfg, onlyOwned as string[]);
+  }
+
+  let jestFiles = Array.from(perProjectFiltered.values()).flat();
+  console.info(
+    `Discovery results → jest=${jestFiles.length} (projects=${projectConfigs.length})`
+  );
+
+  const looksLikeTestPath = (candidatePath: string) =>
+    /\.(test|spec)\.[tj]sx?$/i.test(candidatePath) ||
+    /(^|\/)tests?\//i.test(candidatePath);
+  const prodSelections = expandedProdSelections;
+
+  let effectiveJestFiles = jestFiles.slice();
+  if (selectionHasPaths && prodSelections.length > 0) {
+    console.info(
+      `rg related → prodSelections=${prodSelections.length} (starting)`
+    );
+    const repoRootForRefinement = workspaceRoot ?? (await findRepoRoot());
+    const selectionKey = prodSelections
+      .map((absPath) =>
+        path.relative(repoRootForRefinement, absPath).replace(/\\/g, "/")
+      )
+      .sort((a, b) => a.localeCompare(b))
+      .join("|");
+    const { cachedRelated, findRelatedTestsFast, DEFAULT_TEST_GLOBS } =
+      await import("./fast-related");
+    const { DEFAULT_EXCLUDE } = await import("./args");
+    const rgMatches = await cachedRelated({
+      repoRoot: repoRootForRefinement,
+      selectionKey,
+      compute: () =>
+        findRelatedTestsFast({
+          repoRoot: repoRootForRefinement,
+          productionPaths: prodSelections,
+          testGlobs: DEFAULT_TEST_GLOBS,
+          excludeGlobs: DEFAULT_EXCLUDE,
+          timeoutMs: 1500,
+        }),
+    });
+    console.info(`rg candidates → count=${rgMatches.length}`);
+    console.info("rg candidates →");
+    const normalizedCandidates = rgMatches.map((candidatePath) =>
+      candidatePath.replace(/\\/g, "/")
+    );
+    normalizedCandidates.forEach((candidatePath) =>
+      console.info(` - ${candidatePath}`)
+    );
+    const rgSet = new Set(
+      rgMatches.map((candidate) => candidate.replace(/\\/g, "/"))
+    );
+    if (rgSet.size > 0) {
+      if (selectionIncludesProdPaths) {
+        // Overwrite jestFiles with rg candidates and re-filter per project ownership
+        const rgCandidates = Array.from(rgSet);
+        const perProjectFromRg = new Map<string, string[]>();
+        for (const cfg of projectConfigs) {
+          // eslint-disable-next-line no-await-in-loop
+          const owned = await filterCandidatesForProject(
+            cfg,
+            jestDiscoveryArgs,
+            rgCandidates,
+            path.dirname(cfg)
+          );
+          perProjectFromRg.set(cfg, owned as string[]);
+        }
+        // If ownership filtering lost all candidates,
+        // run a content-based import scan on rg candidates to keep only relevant tests
+        let totalOwned = Array.from(perProjectFromRg.values()).flat().length;
+        if (totalOwned > 0) {
+          perProjectFiltered.clear();
+          for (const [cfg2, owned] of perProjectFromRg.entries()) {
+            perProjectFiltered.set(cfg2, owned);
+          }
+          jestFiles = Array.from(perProjectFiltered.values()).flat();
+          effectiveJestFiles = jestFiles.slice();
+        } else {
+          const repoRootForScan = repoRootForDiscovery;
+          const toSeeds = (abs: string) => {
+            const rel = path.relative(repoRootForScan, abs).replace(/\\/g, "/");
+            const withoutExt = rel.replace(/\.(m?[tj]sx?)$/i, "");
+            const base = path.basename(withoutExt);
+            const segs = withoutExt.split("/");
+            const tail2 = segs.slice(-2).join("/");
+            return Array.from(
+              new Set([withoutExt, base, tail2].filter(Boolean))
+            );
+          };
+          const seeds = Array.from(new Set(prodSelections.flatMap(toSeeds)));
+          const includesSeed = (text: string) =>
+            seeds.some((seed) => text.includes(seed));
+          const tryRead = (filePath: string): string => {
+            try {
+              return fsSync.readFileSync(filePath, "utf8");
+            } catch {
+              return "";
+            }
+          };
+          const resolveLocalImport = (
+            fromFile: string,
+            spec: string
+          ): string | undefined => {
+            const baseDir = path.dirname(fromFile);
+            const cand = path.resolve(baseDir, spec);
+            const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+            for (const ext of exts) {
+              const full = ext ? `${cand}${ext}` : cand;
+              if (fsSync.existsSync(full)) {
+                return full;
+              }
+            }
+            // index files
+            for (const ext of exts) {
+              const full = path.join(cand, `index${ext}`);
+              if (fsSync.existsSync(full)) {
+                return full;
+              }
+            }
+            return undefined;
+          };
+          const importSpecs = (body: string): string[] => {
+            const out: string[] = [];
+            const importRe = /import\s+[^'"\n]*from\s+['"]([^'"]+)['"];?/g;
+            const requireRe = /require\(\s*['"]([^'"]+)['"]\s*\)/g;
+            let importMatch: RegExpExecArray | null;
+            // eslint-disable-next-line no-cond-assign
+            while ((importMatch = importRe.exec(body))) {
+              out.push(importMatch[1]!);
+            }
+            // eslint-disable-next-line no-cond-assign
+            let requireMatch: RegExpExecArray | null;
+            // eslint-disable-next-line no-cond-assign
+            while ((requireMatch = requireRe.exec(body))) {
+              out.push(requireMatch[1]!);
+            }
+            return out;
+          };
+          const keptCandidates: string[] = [];
+          for (const cand of rgCandidates) {
+            const body = tryRead(cand);
+            if (includesSeed(body)) {
+              keptCandidates.push(cand);
+              continue;
+            }
+            const specs = importSpecs(body).filter(
+              (sp) => sp.startsWith(".") || sp.startsWith("/")
+            );
+            let kept = false;
+            for (const spec of specs) {
+              const target = resolveLocalImport(cand, spec);
+              if (!target) {
+                continue;
+              }
+              const tb = tryRead(target);
+              if (includesSeed(tb)) {
+                kept = true;
+                break;
+              }
+            }
+            if (kept) {
+              keptCandidates.push(cand);
+            }
+          }
+          if (keptCandidates.length > 0) {
+            const perProjectFromScan = new Map<string, string[]>();
+            for (const cfg of projectConfigs) {
+              // eslint-disable-next-line no-await-in-loop
+              const owned = await filterCandidatesForProject(
+                cfg,
+                jestDiscoveryArgs,
+                keptCandidates,
+                path.dirname(cfg)
+              );
+              perProjectFromScan.set(cfg, owned as string[]);
+            }
+            totalOwned = Array.from(perProjectFromScan.values()).flat().length;
+            if (totalOwned > 0) {
+              perProjectFiltered.clear();
+              for (const [cfg, owned] of perProjectFromScan.entries()) {
+                perProjectFiltered.set(cfg, owned);
+              }
+              jestFiles = Array.from(perProjectFiltered.values()).flat();
+              effectiveJestFiles = jestFiles.slice();
+            }
+          }
+        }
+        // If still zero after scan, leave as zero to trigger jest-list fallback later
+        // and do NOT assign all candidates to an arbitrary project.
+      } else {
+        const narrowedJest = effectiveJestFiles.filter((candidate) =>
+          rgSet.has(candidate.replace(/\\/g, "/"))
+        );
+        if (narrowedJest.length > 0) {
+          effectiveJestFiles = narrowedJest;
+        }
+      }
+    }
+    if (effectiveJestFiles.length === 0) {
+      const repoRoot = repoRootForRefinement;
+      const seeds = prodSelections
+        .map((abs) =>
+          path
+            .relative(repoRoot, abs)
+            .replace(/\\/g, "/")
+            .replace(/\.(m?[tj]sx?)$/i, "")
+        )
+        .flatMap((rel) => {
+          const base = path.basename(rel);
+          const segments = rel.split("/");
+          return Array.from(
+            new Set([rel, base, segments.slice(-2).join("/")].filter(Boolean))
+          );
+        });
+
+      const includesSeed = (text: string) =>
+        seeds.some((seed) => text.includes(seed));
+      const tryReadFile = async (absPath: string): Promise<string> => {
+        try {
+          return await fs.readFile(absPath, "utf8");
+        } catch {
+          return "";
+        }
+      };
+      const resolveLocalImport = (
+        fromFile: string,
+        spec: string
+      ): string | undefined => {
+        const baseDir = path.dirname(fromFile);
+        const candidate = path.resolve(baseDir, spec);
+        const extensions = [
+          "",
+          ".ts",
+          ".tsx",
+          ".js",
+          ".jsx",
+          ".mjs",
+          ".cjs",
+          ".mts",
+          ".cts",
+        ];
+        for (const ext of extensions) {
+          const fullPath = ext ? `${candidate}${ext}` : candidate;
+          if (fsSync.existsSync(fullPath)) {
+            return fullPath;
+          }
+        }
+        for (const ext of extensions) {
+          const fullPath = path.join(candidate, `index${ext}`);
+          if (fsSync.existsSync(fullPath)) {
+            return fullPath;
+          }
+        }
+        return undefined;
+      };
+      const importOrExportSpecs = (body: string): string[] => {
+        const results: string[] = [];
+        const importRegex = /import\s+[^'"\n]*from\s+['"]([^'"]+)['"];?/g;
+        const requireRegex = /require\(\s*['"]([^'"]+)['"]\s*\)/g;
+        const exportFromRegex =
+          /export\s+(?:\*|\{[^}]*\})\s*from\s*['"]([^'"]+)['"];?/g;
+        let match: RegExpExecArray | null;
+        // eslint-disable-next-line no-cond-assign
+        while ((match = importRegex.exec(body))) {
+          results.push(match[1]!);
+        }
+        // eslint-disable-next-line no-cond-assign
+        while ((match = requireRegex.exec(body))) {
+          results.push(match[1]!);
+        }
+        // eslint-disable-next-line no-cond-assign
+        while ((match = exportFromRegex.exec(body))) {
+          results.push(match[1]!);
+        }
+        return results;
+      };
+
+      const union = Array.from(new Set<string>(jestFiles));
+      const keep = new Set<string>();
+      const visitedBodyCache = new Map<string, string>();
+      const specCache = new Map<string, readonly string[]>();
+      const resolutionCache = new Map<string, string | undefined>();
+
+      const getBody = async (absPath: string): Promise<string> => {
+        const existing = visitedBodyCache.get(absPath);
+        if (existing !== undefined) {
+          return existing;
+        }
+        const content = await tryReadFile(absPath);
+        visitedBodyCache.set(absPath, content);
+        return content;
+      };
+
+      const getSpecs = async (absPath: string): Promise<readonly string[]> => {
+        const cached = specCache.get(absPath);
+        if (cached !== undefined) {
+          return cached;
+        }
+        const body = await getBody(absPath);
+        const specs = importOrExportSpecs(body);
+        specCache.set(absPath, specs);
+        return specs;
+      };
+
+      const resolveSpec = (
+        fromFile: string,
+        spec: string
+      ): string | undefined => {
+        const key = `${fromFile}|${spec}`;
+        if (resolutionCache.has(key)) {
+          return resolutionCache.get(key);
+        }
+        const resolved =
+          spec.startsWith(".") || spec.startsWith("/")
+            ? resolveLocalImport(fromFile, spec)
+            : undefined;
+        resolutionCache.set(key, resolved);
+        return resolved;
+      };
+
+      const MAX_DEPTH = 5;
+      const seen = new Set<string>();
+      const matchesTransitively = async (
+        absTestPath: string,
+        depth: number
+      ): Promise<boolean> => {
+        if (depth > MAX_DEPTH) {
+          return false;
+        }
+        const cacheKey = `${absTestPath}@${depth}`;
+        if (seen.has(cacheKey)) {
+          return false;
+        }
+        seen.add(cacheKey);
+        const body = await getBody(absTestPath);
+        if (includesSeed(body)) {
+          return true;
+        }
+        const specs = await getSpecs(absTestPath);
+        for (const spec of specs) {
+          const target = resolveSpec(absTestPath, spec);
+          if (!target) {
+            continue;
+          }
+          // eslint-disable-next-line no-await-in-loop
+          const targetBody = await getBody(target);
+          if (includesSeed(targetBody)) {
+            return true;
+          }
+          // eslint-disable-next-line no-await-in-loop
+          if (await matchesTransitively(target, depth + 1)) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const concurrency = 16;
+      let scanIndex = 0;
+      const workers: Promise<void>[] = [];
+      for (let workerIndex = 0; workerIndex < concurrency; workerIndex += 1) {
+        workers.push(
+          // eslint-disable-next-line no-loop-func
+          (async () => {
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+              const currentIndex = scanIndex;
+              if (currentIndex >= union.length) {
+                break;
+              }
+              scanIndex += 1;
+              const candidate = union[currentIndex]!;
+              // eslint-disable-next-line no-await-in-loop
+              const ok = await matchesTransitively(candidate, 0);
+              if (ok) {
+                keep.add(candidate);
+              }
+            }
+          })()
+        );
+      }
+      await Promise.all(workers);
+
+      const jestKept = jestFiles
+        .filter((candidate) => keep.has(candidate))
+        .sort((left, right) => left.localeCompare(right));
+      if (jestKept.length) {
+        effectiveJestFiles = jestKept;
+      }
+      console.info(
+        `fallback refine (transitive) → jest=${effectiveJestFiles.length}`
+      );
+    }
+  }
+
+  const jestDecision = decideShouldRunJest([], effectiveJestFiles, {
+    selectionSpecified,
+    selectionPaths,
+  });
+  const { shouldRunJest } = jestDecision;
+  const jestCount = effectiveJestFiles.length;
+  const sharePct = Math.round(jestDecision.share * 100);
+  const msg = shouldRunJest
+    ? `Jest selected (${sharePct}% of discovered tests; reason: ${jestDecision.reason})`
+    : `Skipping Jest (${sharePct}% of discovered tests; reason: ${jestDecision.reason})`;
+  console.info(`Discovery → jest: ${jestCount}. ${msg}`);
+
+  if (!shouldRunJest) {
+    console.warn(
+      "No matching tests were discovered for either Vitest or Jest."
+    );
+    console.info(
+      `Jest args: ${[...jestDiscoveryArgs, "--listTests"].join(" ")}`
+    );
+    console.info(
+      "Tip: check your -t/--testNamePattern and file path; Jest lists files selected by your patterns."
+    );
+    process.exit(1);
+    return;
+  }
+
+  console.info(
+    `Run plan → Jest maybe=${shouldRunJest} (projects=${projectConfigs.length})`
+  );
+  let jestExitCode = 0;
+  const executedTestFilesSet = new Set<string>();
+  if (shouldRunJest) {
+    console.info("Starting Jest (no Vitest targets)…");
+    await runJestBootstrap();
+    const jestRunArgs = selectionIncludesProdPaths
+      ? stripPathTokens(jestArgs)
+      : jestArgs;
+    const projectsToRun = projectConfigs.filter(
+      (cfg) => (perProjectFiltered.get(cfg) ?? []).length > 0
+    );
+    const totalProjectsToRun = projectsToRun.length;
+    const stripFooter = (text: string): string => {
+      const lines = text.split("\n");
+      const idx = lines.findIndex((ln) =>
+        /^Test Files\s/.test(stripAnsiSimple(ln))
+      );
+      return idx >= 0 ? lines.slice(0, idx).join("\n").trimEnd() : text;
+    };
+    for (let projIndex = 0; projIndex < projectsToRun.length; projIndex += 1) {
+      const cfg = projectsToRun[projIndex]!;
+      const isLastProject = projIndex === totalProjectsToRun - 1;
+      const files = perProjectFiltered.get(cfg) ?? [];
+      if (files.length === 0) {
+        console.info(
+          `Project ${path.basename(
+            cfg
+          )}: 0 matching tests after filter; skipping.`
+        );
+        // eslint-disable-next-line no-continue
+        continue;
+      }
+      files.forEach((absTestPath) =>
+        executedTestFilesSet.add(path.resolve(absTestPath).replace(/\\/g, "/"))
+      );
+      const outJson = path.join(
+        os.tmpdir(),
+        `jest-bridge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
+      );
+      const reporterPath = path.resolve("scripts/jest-vitest-bridge.cjs");
+      try {
+        if (!fsSync.existsSync(reporterPath)) {
+          fsSync.mkdirSync(path.dirname(reporterPath), { recursive: true });
+          fsSync.writeFileSync(
+            reporterPath,
+            JEST_BRIDGE_REPORTER_SOURCE,
+            "utf8"
+          );
+        }
+      } catch (ensureReporterError) {
+        console.warn(
+          `Unable to ensure jest bridge reporter: ${String(
+            ensureReporterError
+          )}`
+        );
+      }
+      // eslint-disable-next-line no-await-in-loop
+      // Ensure any explicitly selected paths (tests or production files) are included in coverage
+      const selectedFilesForCoverage = selectionPaths
+        .filter((pathToken) => /[\\/]/.test(pathToken))
+        // Avoid restricting coverage to test files when a test path is selected
+        .filter((pathToken) => !looksLikeTestPath(pathToken))
+        .map((pathToken) =>
+          path.relative(repoRootForDiscovery, pathToken).replace(/\\\\/g, "/")
+        )
+        .filter((rel) => rel && !/^\.+\//.test(rel))
+        .map((rel) => (rel.startsWith("./") ? rel : `./${rel}`));
+      const coverageFromArgs: string[] = [];
+      for (const relPath of selectedFilesForCoverage) {
+        coverageFromArgs.push("--collectCoverageFrom", relPath);
+      }
+
+      // eslint-disable-next-line no-await-in-loop
+      const { code, output } = await runWithCapture(
+        babelNodeBin,
+        [
+          "--extensions",
+          ".js,.ts",
+          jestBin,
+          "--config",
+          cfg,
+          "--runTestsByPath",
+          "--reporters",
+          reporterPath,
+          "--silent",
+          "--colors",
+          "--json",
+          "--outputFile",
+          outJson,
+          ...jestRunArgs,
+          ...coverageFromArgs,
+          "--passWithNoTests",
+          ...files,
+        ],
+        {
+          env: safeEnv(process.env, {
+            NODE_ENV: "test",
+            JEST_BRIDGE_OUT: outJson,
+            FORCE_COLOR: "3",
+            TERM: process.env.TERM || "xterm-256color",
+          }) as unknown as NodeJS.ProcessEnv,
+        }
+      );
+      let pretty = "";
+      try {
+        const debug = isDebug();
+        if (debug) {
+          const capturedLen = output.length;
+          console.info(`jest captured output length=${capturedLen}`);
+          const fileSizeBytes = fsSync.existsSync(outJson)
+            ? fsSync.statSync(outJson).size
+            : -1;
+          console.info(`bridge json @ ${outJson} size=${fileSizeBytes}`);
+        }
+        const jsonText = fsSync.readFileSync(outJson, "utf8");
+        const parsed = JSON.parse(jsonText) as unknown;
+        const bridge = coerceJestJsonToBridge(parsed);
+        pretty = renderVitestFromJestJSON(bridge, {
+          cwd: repoRootForDiscovery,
+          ...(editorCmd !== undefined ? { editorCmd } : {}),
+        });
+        if (debug) {
+          const preview = pretty.split("\n").slice(0, 3).join("\n");
+          console.info(
+            `pretty preview (json):\n${preview}${
+              pretty.includes("\n") ? "\n…" : ""
+            }`
+          );
+        }
+      } catch (jsonErr) {
+        const debug = isDebug();
+        if (debug) {
+          console.info(
+            "renderer: fallback to text prettifier (missing/invalid JSON)"
+          );
+          console.info(String(jsonErr));
+          console.info(
+            `fallback: raw output lines=${output.split(/\r?\n/).length}`
+          );
+        }
+        const renderOpts = {
+          cwd: repoRootForDiscovery,
+          ...(editorCmd !== undefined ? { editorCmd } : {}),
+        } as const;
+        pretty = formatJestOutputVitest(output, renderOpts);
+        if (debug) {
+          const preview = pretty.split("\n").slice(0, 3).join("\n");
+          console.info(
+            `pretty preview (text):\n${preview}${
+              pretty.includes("\n") ? "\n…" : ""
+            }`
+          );
+        }
+      }
+      if (!isLastProject) {
+        pretty = stripFooter(pretty);
+      }
+      if (pretty.trim().length > 0) {
+        process.stdout.write(pretty.endsWith("\n") ? pretty : `${pretty}\n`);
+      }
+      if (Number(code) !== 0) {
+        jestExitCode = code;
+      }
+    }
+  } else {
+    console.info("Jest run skipped based on selection and thresholds.");
+  }
+
+  // If abort-on-failure is requested for coverage, exit immediately after tests when failing
+  if (
+    collectCoverage &&
+    shouldRunJest &&
+    coverageAbortOnFailure &&
+    jestExitCode !== 0
+  ) {
+    process.exit(jestExitCode);
+  }
+
+  if (collectCoverage && shouldRunJest) {
+    await mergeLcov();
+    const repoRoot = workspaceRoot ?? (await findRepoRoot());
+    const mergedOptsBase = {
+      selectionSpecified,
+      selectionPaths,
+      includeGlobs,
+      excludeGlobs,
+      workspaceRoot: repoRoot,
+      ...(editorCmd !== undefined ? { editorCmd } : {}),
+      ...(coverageDetail !== undefined ? { coverageDetail } : {}),
+      ...(coverageShowCode !== undefined ? { coverageShowCode } : {}),
+      coverageMode,
+      ...(coverageMaxFilesArg !== undefined
+        ? { coverageMaxFiles: coverageMaxFilesArg }
+        : {}),
+      ...(coverageMaxHotspotsArg !== undefined
+        ? { coverageMaxHotspots: coverageMaxHotspotsArg }
+        : {}),
+      coveragePageFit,
+      executedTests: Array.from(executedTestFilesSet),
+    } as const;
+    await emitMergedCoverage(coverageUi, mergedOptsBase);
+  }
+
+  const finalExitCode = jestExitCode;
+  process.exit(finalExitCode);
+};

@@ -1,0 +1,59 @@
+{
+  "name": "headlamp",
+  "version": "0.1.0",
+  "description": "Coverage-first, runner-agnostic test UX CLI for Jest",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist-types/index.d.ts",
+  "bin": {
+    "headlamp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "dist-types"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "prepublishOnly": "npm run build",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "release": "npm publish --access public"
+  },
+  "keywords": [
+    "testing",
+    "coverage",
+    "jest",
+    "vitest",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "es-toolkit": "^1.7.2",
+    "istanbul-lib-report": "^3.0.1",
+    "istanbul-reports": "^3.1.6"
+  },
+  "peerDependencies": {
+    "jest": "*",
+    "vitest": "*"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.37.0",
+    "@typescript-eslint/parser": "^8.37.0",
+    "eslint": "8.57.1",
+    "eslint-config-airbnb-base": "^15.0.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-import-resolver-typescript": "^4.4.4",
+    "eslint-plugin-import": "^2.29.1",
+    "eslint-plugin-node-import": "^1.0.5",
+    "eslint-plugin-prettier": "^5.2.1",
+    "eslint-plugin-promise": "^6.1.1",
+    "prettier": "^3.3.3",
+    "esbuild": "^0.21.5",
+    "tslib": "^2.6.3",
+    "typescript": "^5.5.4"
+  }
+}

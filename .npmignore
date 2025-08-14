@@ -1,0 +1,8 @@
+src
+scripts
+tsconfig.json
+*.map
+*.tsbuildinfo
+node_modules
+coverage
+
