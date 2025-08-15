@@ -426,7 +426,7 @@ export const program = async (): Promise<void> => {
   } = deriveArgs(argv);
   // Derive changed-file selection (staged/unstaged/all) when requested
   const getChangedFiles = async (
-    mode: 'all' | 'staged' | 'unstaged',
+    mode: 'all' | 'staged' | 'unstaged' | 'branch',
     cwd: string,
   ): Promise<readonly string[]> => {
     const collect = async (cmd: string, args: readonly string[]) => {
@@ -444,6 +444,60 @@ export const program = async (): Promise<void> => {
         return [] as string[];
       }
     };
+    if (mode === 'branch') {
+      // Determine default branch (origin/HEAD -> ref or fall back to origin/main, origin/master)
+      const resolveDefaultBranch = async (): Promise<string | undefined> => {
+        const candidates: string[] = [];
+        try {
+          const sym = await collect('git', ['symbolic-ref', 'refs/remotes/origin/HEAD']);
+          const headRef = sym.find((ln) => ln.includes('refs/remotes/origin/'));
+          if (headRef) {
+            const m = /refs\/remotes\/(.+)/.exec(headRef);
+            if (m && m[1]) {
+              candidates.push(m[1]);
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+        candidates.push('origin/main', 'origin/master');
+        for (const cand of candidates) {
+          // eslint-disable-next-line no-await-in-loop
+          const exists = await collect('git', ['rev-parse', '--verify', cand]);
+          if (exists.length > 0) {
+            return cand;
+          }
+        }
+        return undefined;
+      };
+      const defaultBranch = await resolveDefaultBranch();
+      const mergeBase = defaultBranch
+        ? (await collect('git', ['merge-base', 'HEAD', defaultBranch]))[0]
+        : undefined;
+      const diffBase = mergeBase ?? 'HEAD^';
+      const branchDiff = await collect('git', [
+        'diff',
+        '--name-only',
+        '--diff-filter=ACMRTUXB',
+        diffBase,
+        'HEAD',
+      ]);
+      // On top of branch diff, include current uncommitted (staged/unstaged) and untracked changes
+      const stagedNow = await collect('git', [
+        'diff',
+        '--name-only',
+        '--diff-filter=ACMRTUXB',
+        '--cached',
+      ]);
+      const unstagedNow = await collect('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB']);
+      const untrackedNow = await collect('git', ['ls-files', '--others', '--exclude-standard']);
+      const rels = Array.from(
+        new Set([...branchDiff, ...stagedNow, ...unstagedNow, ...untrackedNow]),
+      );
+      return rels
+        .map((rel) => path.resolve(cwd, rel).replace(/\\/g, '/'))
+        .filter((abs) => !abs.includes('/node_modules/') && !abs.includes('/coverage/'));
+    }
     const staged =
       mode === 'staged' || mode === 'all'
         ? await collect('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB', '--cached'])
@@ -827,6 +881,27 @@ export const program = async (): Promise<void> => {
     }
     if (effectiveJestFiles.length === 0) {
       const repoRoot = repoRootForRefinement;
+      // If no candidates remain, expand search
+      // universe to all discovered Jest tests across projects
+      if (jestFiles.length === 0) {
+        try {
+          const allAcross: string[] = [];
+          for (const cfg of projectConfigs) {
+            const cfgCwd = path.dirname(cfg);
+            // eslint-disable-next-line no-await-in-loop
+            const listed = await discoverJestResilient([...jestDiscoveryArgs, '--config', cfg], {
+              cwd: cfgCwd,
+            });
+            allAcross.push(...listed);
+          }
+          const uniqAll = Array.from(new Set(allAcross.map((p) => p.replace(/\\/g, '/'))));
+          if (uniqAll.length > 0) {
+            jestFiles = uniqAll;
+          }
+        } catch {
+          // ignore
+        }
+      }
       const seeds = prodSelections
         .map((abs) =>
           path

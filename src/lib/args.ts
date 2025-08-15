@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 
-export type ChangedMode = 'all' | 'staged' | 'unstaged';
+export type ChangedMode = 'all' | 'staged' | 'unstaged' | 'branch';
 
 export type Action =
   | { readonly type: 'coverage'; readonly coverageValue: boolean }
@@ -294,13 +294,25 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
     rule.startsWith('--changed=', (value) => {
       const raw = (value.split('=')[1] ?? '').trim().toLowerCase();
       const mode: ChangedMode =
-        raw === 'staged' ? 'staged' : raw === 'unstaged' ? 'unstaged' : 'all';
+        raw === 'staged'
+          ? 'staged'
+          : raw === 'unstaged'
+            ? 'unstaged'
+            : raw === 'branch'
+              ? 'branch'
+              : 'all';
       return step([ActionBuilders.changed(mode)]);
     }),
     rule.withLookahead('--changed', (_flag, lookahead) => {
       const raw = String(lookahead).trim().toLowerCase();
       const mode: ChangedMode =
-        raw === 'staged' ? 'staged' : raw === 'unstaged' ? 'unstaged' : 'all';
+        raw === 'staged'
+          ? 'staged'
+          : raw === 'unstaged'
+            ? 'unstaged'
+            : raw === 'branch'
+              ? 'branch'
+              : 'all';
       return step([ActionBuilders.changed(mode)], true);
     }),
 

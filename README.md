@@ -69,11 +69,43 @@ npx headlamp --onlyFailures
 npx headlamp --changed --onlyFailures
 ```
 
+## Changed-file selection
+
+- `--changed[=mode]` selects tests by files changed in your working tree or branch.
+  - Modes:
+    - `all` (default when `--changed` is passed without a value): includes staged + unstaged + untracked files.
+    - `staged`: only staged changes.
+    - `unstaged`: only unstaged + untracked files.
+    - `branch`: union of
+      - files changed on the current branch relative to the default branch (via merge-base), and
+      - your current uncommitted changes (staged, unstaged tracked, and untracked files).
+      - Default branch is resolved via `origin/HEAD` when available, falling back to `origin/main` or `origin/master`.
+  - Effects:
+    - Uses changed production files as seeds to discover related tests by import-graph.
+    - Coverage tables prioritize and annotate files related to selection/changed files.
+
+Examples:
+
+```bash
+# Staged changes only
+npx headlamp --changed=staged
+
+# All working tree changes
+npx headlamp --changed
+
+# Diff current branch against default branch (merge-base)
+npx headlamp --changed=branch
+
+# Combine with coverage
+npx headlamp --coverage --changed=branch
+```
+
 ## Coverage flags
 
 - `--coverage`: enables coverage collection and prints merged coverage output after test execution. Uses your project's Jest/Vitest setup and reads coverage JSON from Jest.
   - Prints a compact per-file table with hotspots and optionally detailed per-file breakdowns.
   - Honors file selection and include/exclude globs when rendering coverage tables.
+  - When `--changed` is specified, coverage views factor in those changed files as selection seeds, influencing relevancy ordering and the “changed-related” highlighting.
 - `--coverage.abortOnFailure`: if tests fail, exit immediately with the test exit code and skip coverage printing. Useful in CI when failures should short-circuit.
 - `--coverage.ui=jest|both`:
   - `jest`: write Istanbul text report to `coverage/merged/coverage.txt` only.
