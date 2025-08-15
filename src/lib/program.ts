@@ -31,9 +31,11 @@ import {
   coerceJestJsonToBridge,
   formatJestOutputVitest,
 } from './jest-bridge';
+import type { BridgeJSON } from './jest-bridge';
 import { stripAnsiSimple } from './stacks';
 import { tintPct } from './bars';
 import { selectDirectTestsForProduction } from './graph-distance';
+import { computeDirectnessRank, sortTestResultsWithRank } from './relevance';
 
 const jestBin = './node_modules/.bin/jest';
 const babelNodeBin = './node_modules/.bin/babel-node';
@@ -56,7 +58,6 @@ const isDebug = (): boolean =>
   Boolean((process.env as unknown as { TEST_CLI_DEBUG?: string }).TEST_CLI_DEBUG);
 
 export const mergeLcov = async (): Promise<void> => {
-  const jestLcovPath = 'coverage/jest/lcov.info';
   const vitestLcovPath = 'coverage/vitest/lcov.info';
   const mergedOutPath = 'coverage/lcov.info';
   const readOrEmpty = async (filePath: string) => {
@@ -67,7 +68,7 @@ export const mergeLcov = async (): Promise<void> => {
     }
   };
   let vitestContent = '';
-  let jestContent = '';
+  const jestParts: string[] = [];
   try {
     vitestContent = await readOrEmpty(vitestLcovPath);
   } catch (readVitestError) {
@@ -75,20 +76,52 @@ export const mergeLcov = async (): Promise<void> => {
       console.info(`read vitest lcov failed: ${String(readVitestError)}`);
     }
   }
+  // Merge all lcov.info files under coverage/jest/** (including root)
+  const collectLcovs = (dir: string): string[] => {
+    const out: string[] = [];
+    try {
+      const entries = fsSync.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          out.push(...collectLcovs(full));
+        } else if (entry.isFile() && entry.name === 'lcov.info') {
+          out.push(full);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return out;
+  };
   try {
-    jestContent = await readOrEmpty(jestLcovPath);
+    const jestRoot = path.join('coverage', 'jest');
+    const candidates = [path.join(jestRoot, 'lcov.info'), ...collectLcovs(jestRoot)]
+      .map((candidatePath) => path.resolve(candidatePath))
+      .filter((absolutePath, index, arr) => arr.indexOf(absolutePath) === index);
+    for (const filePath of candidates) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const content = await readOrEmpty(filePath);
+        if (content.trim()) {
+          jestParts.push(content.trim());
+        }
+      } catch {
+        /* ignore */
+      }
+    }
   } catch (readJestError) {
     if (isDebug()) {
-      console.info(`read jest lcov failed: ${String(readJestError)}`);
+      console.info(`scan jest lcov failed: ${String(readJestError)}`);
     }
   }
-  if (!vitestContent && !jestContent) {
+  if (!vitestContent && jestParts.length === 0) {
     if (isDebug()) {
       console.info('No coverage outputs found to merge.');
     }
     return;
   }
-  const merged = [vitestContent.trim(), jestContent.trim()].filter(Boolean).join('\n');
+  const merged = [vitestContent.trim(), ...jestParts].filter(Boolean).join('\n');
   if (merged.length > 0) {
     await (await import('node:fs/promises')).mkdir('coverage', { recursive: true });
     await (await import('node:fs/promises')).writeFile(mergedOutPath, `${merged}\n`, 'utf8');
@@ -118,23 +151,45 @@ export const emitMergedCoverage = async (
     readonly executedTests?: readonly string[];
   },
 ): Promise<void> => {
-  const jestJson = path.join('coverage', 'jest', 'coverage-final.json');
-  const jSize = fsSync.existsSync(jestJson) ? fsSync.statSync(jestJson).size : -1;
-  const jestSizeLabel = jSize >= 0 ? `${jSize} bytes` : 'missing';
-  if (isDebug()) {
-    console.info(`Coverage JSON probe → jest: ${jestSizeLabel}`);
-  }
-  const jestData = await readCoverageJson(jestJson);
-  const jestFilesCount = Object.keys(jestData).length;
-  if (isDebug()) {
-    console.info(`Decoded coverage entries → jest: ${jestFilesCount}`);
-  }
+  // Merge any coverage-final.json under coverage/jest/**
   const map = createCoverageMap({});
-  if (jestFilesCount > 0) {
+  const listJsons = (dir: string): string[] => {
+    const out: string[] = [];
     try {
-      map.merge(jestData);
+      const entries = fsSync.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          out.push(...listJsons(full));
+        } else if (entry.isFile() && entry.name === 'coverage-final.json') {
+          out.push(full);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return out;
+  };
+  const coverageRoot = path.join('coverage', 'jest');
+  const jsonCandidates = [
+    path.join(coverageRoot, 'coverage-final.json'),
+    ...listJsons(coverageRoot),
+  ]
+    .map((candidatePath) => path.resolve(candidatePath))
+    .filter((absolutePath, index, arr) => {
+      const isFirst = arr.indexOf(absolutePath) === index;
+      const exists = fsSync.existsSync(absolutePath);
+      return isFirst && exists;
+    });
+  for (const jsonPath of jsonCandidates) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const data = await readCoverageJson(jsonPath);
+      if (Object.keys(data).length) {
+        map.merge(data);
+      }
     } catch (mergeJestError) {
-      console.warn(`Failed merging jest coverage JSON: ${String(mergeJestError)}`);
+      console.warn(`Failed merging jest coverage JSON @ ${jsonPath}: ${String(mergeJestError)}`);
     }
   }
   if (map.files().length === 0) {
@@ -965,23 +1020,46 @@ export const program = async (): Promise<void> => {
 
   console.info(`Run plan → Jest maybe=${shouldRunJest} (projects=${projectConfigs.length})`);
   let jestExitCode = 0;
+  const allBridgeJson: Array<ReturnType<typeof coerceJestJsonToBridge>> = [];
   const executedTestFilesSet = new Set<string>();
   if (shouldRunJest) {
     console.info('Starting Jest (no Vitest targets)…');
     await runJestBootstrap();
     const jestRunArgs = selectionIncludesProdPaths ? stripPathTokens(jestArgs) : jestArgs;
+    const sanitizedJestRunArgs = jestRunArgs.filter(
+      (arg) => !/^--coverageDirectory(?:=|$)/.test(String(arg)),
+    );
     const projectsToRun = projectConfigs.filter(
       (cfg) => (perProjectFiltered.get(cfg) ?? []).length > 0,
     );
-    const totalProjectsToRun = projectsToRun.length;
     const stripFooter = (text: string): string => {
       const lines = text.split('\n');
       const idx = lines.findIndex((ln) => /^Test Files\s/.test(stripAnsiSimple(ln)));
       return idx >= 0 ? lines.slice(0, idx).join('\n').trimEnd() : text;
     };
+    // Compute directness order for the whole run (project-agnostic list)
+    const prodSeedsForRun = ((): readonly string[] => {
+      const changedAbs = (changedSelectionAbs ?? []).map((absPath) =>
+        path.resolve(absPath).replace(/\\/g, '/'),
+      );
+      const selAbs = (selectionPathsAugmented as readonly string[]).map((pathToken) =>
+        path.resolve(pathToken).replace(/\\/g, '/'),
+      );
+      return (changedAbs.length ? changedAbs : selAbs).filter(
+        (abs) =>
+          /[\\/]/.test(abs) &&
+          !/(^|\/)tests?\//i.test(abs) &&
+          !/\.(test|spec)\.[tj]sx?$/i.test(abs),
+      );
+    })();
+    const repoRootForRank = repoRootForDiscovery;
+    const fileRank = await computeDirectnessRank({
+      repoRoot: repoRootForRank,
+      productionSeeds: prodSeedsForRun,
+    });
+
     for (let projIndex = 0; projIndex < projectsToRun.length; projIndex += 1) {
       const cfg = projectsToRun[projIndex]!;
-      const isLastProject = projIndex === totalProjectsToRun - 1;
       const files = perProjectFiltered.get(cfg) ?? [];
       if (files.length === 0) {
         console.info(`Project ${path.basename(cfg)}: 0 matching tests after filter; skipping.`);
@@ -1028,14 +1106,19 @@ export const program = async (): Promise<void> => {
           '--config',
           cfg,
           '--runTestsByPath',
-          '--reporters',
-          reporterPath,
+          `--reporters=${reporterPath}`,
           '--silent',
           '--colors',
           '--json',
           '--outputFile',
           outJson,
-          ...jestRunArgs,
+          ...sanitizedJestRunArgs,
+          ...(collectCoverage
+            ? [
+                '--coverageDirectory',
+                path.join('coverage', 'jest', path.basename(cfg).replace(/[^a-zA-Z0-9_.-]+/g, '_')),
+              ]
+            : []),
           ...coverageFromArgs,
           '--passWithNoTests',
           ...files,
@@ -1061,10 +1144,23 @@ export const program = async (): Promise<void> => {
         const jsonText = fsSync.readFileSync(outJson, 'utf8');
         const parsed = JSON.parse(jsonText) as unknown;
         const bridge = coerceJestJsonToBridge(parsed);
-        pretty = renderVitestFromJestJSON(bridge, {
-          cwd: repoRootForDiscovery,
-          ...(editorCmd !== undefined ? { editorCmd } : {}),
-        });
+        allBridgeJson.push(bridge);
+        // Reorder per-file results by directness and failure before rendering
+        try {
+          const reordered = {
+            ...bridge,
+            testResults: sortTestResultsWithRank(fileRank, bridge.testResults).reverse(),
+          } as typeof bridge;
+          pretty = renderVitestFromJestJSON(reordered, {
+            cwd: repoRootForDiscovery,
+            ...(editorCmd !== undefined ? { editorCmd } : {}),
+          });
+        } catch {
+          pretty = renderVitestFromJestJSON(bridge, {
+            cwd: repoRootForDiscovery,
+            ...(editorCmd !== undefined ? { editorCmd } : {}),
+          });
+        }
         if (debug) {
           const preview = pretty.split('\n').slice(0, 3).join('\n');
           console.info(`pretty preview (json):\n${preview}${pretty.includes('\n') ? '\n…' : ''}`);
@@ -1086,9 +1182,8 @@ export const program = async (): Promise<void> => {
           console.info(`pretty preview (text):\n${preview}${pretty.includes('\n') ? '\n…' : ''}`);
         }
       }
-      if (!isLastProject) {
-        pretty = stripFooter(pretty);
-      }
+      // Always drop per-project footer; we'll print a unified summary later
+      pretty = stripFooter(pretty);
       if (pretty.trim().length > 0) {
         process.stdout.write(pretty.endsWith('\n') ? pretty : `${pretty}\n`);
       }
@@ -1100,11 +1195,72 @@ export const program = async (): Promise<void> => {
     console.info('Jest run skipped based on selection and thresholds.');
   }
 
-  // If abort-on-failure is requested for coverage, exit immediately after tests when failing
-  if (collectCoverage && shouldRunJest && coverageAbortOnFailure && jestExitCode !== 0) {
-    process.exit(jestExitCode);
+  // Print unified merged summary across all projects when available
+  if (allBridgeJson.length > 0) {
+    const agg = allBridgeJson.map((bridge) => bridge.aggregated);
+    const sum = (select: (arg: (typeof agg)[number]) => number) =>
+      agg.reduce((total, item) => total + (select(item) || 0), 0);
+    const startTime = Math.min(
+      ...allBridgeJson.map((bridge) => Number(bridge.startTime || Date.now())),
+    );
+    const unified = {
+      startTime,
+      testResults: allBridgeJson.flatMap((bridge) => bridge.testResults),
+      aggregated: {
+        numTotalTestSuites: sum((item) => item.numTotalTestSuites),
+        numPassedTestSuites: sum((item) => item.numPassedTestSuites),
+        numFailedTestSuites: sum((item) => item.numFailedTestSuites),
+        numTotalTests: sum((item) => item.numTotalTests),
+        numPassedTests: sum((item) => item.numPassedTests),
+        numFailedTests: sum((item) => item.numFailedTests),
+        numPendingTests: sum((item) => item.numPendingTests),
+        numTodoTests: sum((item) => item.numTodoTests),
+        startTime,
+        success: agg.every((item) => Boolean(item.success)),
+        runTimeMs: sum((item) => Number(item.runTimeMs ?? 0)),
+      },
+    } as const;
+    // Relevance-based ordering of test results: prioritize tests by directness (import-graph distance)
+    try {
+      const prodSeeds = ((): readonly string[] => {
+        const changedAbs = (changedSelectionAbs ?? []).map((absPath) =>
+          path.resolve(absPath).replace(/\\/g, '/'),
+        );
+        const selAbs = (selectionPathsAugmented as readonly string[]).map((pathToken) =>
+          path.resolve(pathToken).replace(/\\/g, '/'),
+        );
+        return (changedAbs.length ? changedAbs : selAbs).filter(
+          (abs) =>
+            /[\\/]/.test(abs) &&
+            !/(^|\/)tests?\//i.test(abs) &&
+            !/\.(test|spec)\.[tj]sx?$/i.test(abs),
+        );
+      })();
+      const unifiedRank = await computeDirectnessRank({
+        repoRoot: repoRootForDiscovery,
+        productionSeeds: prodSeeds,
+      });
+      const ordered = sortTestResultsWithRank(unifiedRank, unified.testResults).reverse();
+      // eslint-disable-next-line no-param-reassign
+      (unified as any).testResults = ordered;
+    } catch {
+      // ignore relevance sorting on failure
+    }
+    const text = renderVitestFromJestJSON(unified as unknown as BridgeJSON, {
+      cwd: repoRootForDiscovery,
+      ...(editorCmd !== undefined ? { editorCmd } : {}),
+    });
+    if (text.trim().length > 0) {
+      process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+    }
   }
 
+  const finalExitCode = jestExitCode;
+  if (collectCoverage && shouldRunJest && coverageAbortOnFailure && finalExitCode !== 0) {
+    process.exit(finalExitCode);
+    return;
+  }
+  // Only compute and print coverage if we are not aborting after failures
   if (collectCoverage && shouldRunJest) {
     await mergeLcov();
     const repoRoot = workspaceRoot ?? (await findRepoRoot());
@@ -1127,7 +1283,5 @@ export const program = async (): Promise<void> => {
     } as const;
     await emitMergedCoverage(coverageUi, mergedOptsBase);
   }
-
-  const finalExitCode = jestExitCode;
   process.exit(finalExitCode);
 };

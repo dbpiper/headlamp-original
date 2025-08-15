@@ -5,7 +5,7 @@ Coverage-first, runner-agnostic test UX for Jest/Vitest. Delegates execution to 
 ## Install
 
 Only in /Users/david/src/headlamp/src/lib: PLACEHOLDER
-Only in /Users/david/src/headlamp/src/lib: _exec.ts
+Only in /Users/david/src/headlamp/src/lib: \_exec.ts
 Files /Users/david/src/gigworx-node/scripts/cli/coverage-print.ts and /Users/david/src/headlamp/src/lib/coverage-print.ts differ
 Files /Users/david/src/gigworx-node/scripts/cli/discovery.ts and /Users/david/src/headlamp/src/lib/discovery.ts differ
 Only in /Users/david/src/headlamp/src/lib: env-utils.ts
@@ -31,6 +31,7 @@ removed
 
 Alpha. API/CLI flags may change.
 und hotspots
+
 - `--coverage.mode=compact|full|auto`: compact table vs full per-file details
 - `--coverage.maxFiles`, `--coverage.maxHotspots`: limit rows to fit your terminal
 - `--coverage.pageFit=true|false`: adapt output to terminal rows
@@ -51,6 +52,33 @@ npx headlamp --coverage
 npx headlamp --coverage src/services/user.ts src/components/UserCard.tsx
 ```
 
+## Coverage flags
+
+- `--coverage`: enables coverage collection and prints merged coverage output after test execution. Uses your project's Jest/Vitest setup and reads coverage JSON from Jest.
+  - Prints a compact per-file table with hotspots and optionally detailed per-file breakdowns.
+  - Honors file selection and include/exclude globs when rendering coverage tables.
+- `--coverage.abortOnFailure`: if tests fail, exit immediately with the test exit code and skip coverage printing. Useful in CI when failures should short-circuit.
+- `--coverage.ui=jest|both`:
+  - `jest`: write Istanbul text report to `coverage/merged/coverage.txt` only.
+  - `both` (default): write both `coverage.txt` and `coverage-summary.txt`.
+- Display and filtering options:
+  - `--coverage.mode=compact|full|auto` (default: `auto`): choose compact table-only or full per-file details.
+  - `--coverage.detail=<n>|all|auto` (default: `auto`): number of uncovered lines per file to show; `all` shows everything.
+  - `--coverage.showCode=true|false` (default: `true` when TTY): show code snippets for uncovered lines in full mode.
+  - `--coverage.maxFiles=<n>`: limit number of files in printed tables.
+  - `--coverage.maxHotspots=<n>`: limit hotspots per file in compact mode.
+  - `--coverage.pageFit=true|false` (default: `true` when TTY): fit output to terminal rows.
+
+Examples:
+
+```bash
+# Abort on failing tests without printing coverage
+npx headlamp --coverage --coverage.abortOnFailure
+
+# Show compact coverage limited to 50 files and 5 hotspots per file
+npx headlamp --coverage --coverage.mode=compact --coverage.maxFiles=50 --coverage.maxHotspots=5
+```
+
 ## Editor links
 
 Headlamp prints clickable links (OSC 8) to open files at hotspots. Set `--coverage.editor` to override the default editor URL template if needed.
@@ -60,7 +88,7 @@ Headlamp prints clickable links (OSC 8) to open files at hotspots. Set `--covera
 You can import pieces programmatically:
 
 ```ts
-import { printCompactCoverage, resolveImportWithRoot } from "headlamp";
+import { printCompactCoverage, resolveImportWithRoot } from 'headlamp';
 ```
 
 ## Status
