@@ -52,6 +52,23 @@ npx headlamp --coverage
 npx headlamp --coverage src/services/user.ts src/components/UserCard.tsx
 ```
 
+## Output flags
+
+- `--onlyFailures[=true|false]`:
+  - When enabled, the CLI prints only failing tests during execution across all views, while still printing the final test summary (files/tests/time) at the end.
+  - Supported forms: `--onlyFailures`, `--onlyFailures=true`, `--onlyFailures=false`.
+  - Works with other selection flags (e.g., `-t`, `--changed`).
+
+Examples:
+
+```bash
+# Show only failures during the run, but still print the final summary
+npx headlamp --onlyFailures
+
+# Combine with changed-file selection
+npx headlamp --changed --onlyFailures
+```
+
 ## Coverage flags
 
 - `--coverage`: enables coverage collection and prints merged coverage output after test execution. Uses your project's Jest/Vitest setup and reads coverage JSON from Jest.

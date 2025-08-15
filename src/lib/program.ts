@@ -30,8 +30,8 @@ import {
   renderVitestFromJestJSON,
   coerceJestJsonToBridge,
   formatJestOutputVitest,
+  type BridgeJSON,
 } from './jest-bridge';
-import type { BridgeJSON } from './jest-bridge';
 import { stripAnsiSimple } from './stacks';
 import { tintPct } from './bars';
 import { selectDirectTestsForProduction } from './graph-distance';
@@ -409,6 +409,7 @@ export const program = async (): Promise<void> => {
     collectCoverage,
     coverageUi,
     coverageAbortOnFailure,
+    onlyFailures,
     selectionSpecified,
     selectionPaths,
     includeGlobs,
@@ -1154,11 +1155,13 @@ export const program = async (): Promise<void> => {
           pretty = renderVitestFromJestJSON(reordered, {
             cwd: repoRootForDiscovery,
             ...(editorCmd !== undefined ? { editorCmd } : {}),
+            onlyFailures,
           });
         } catch {
           pretty = renderVitestFromJestJSON(bridge, {
             cwd: repoRootForDiscovery,
             ...(editorCmd !== undefined ? { editorCmd } : {}),
+            onlyFailures,
           });
         }
         if (debug) {
@@ -1175,6 +1178,7 @@ export const program = async (): Promise<void> => {
         const renderOpts = {
           cwd: repoRootForDiscovery,
           ...(editorCmd !== undefined ? { editorCmd } : {}),
+          onlyFailures,
         } as const;
         pretty = formatJestOutputVitest(output, renderOpts);
         if (debug) {
@@ -1220,7 +1224,7 @@ export const program = async (): Promise<void> => {
         runTimeMs: sum((item) => Number(item.runTimeMs ?? 0)),
       },
     } as const;
-    // Relevance-based ordering of test results: prioritize tests by directness (import-graph distance)
+    // Order results by directness (import-graph distance)
     try {
       const prodSeeds = ((): readonly string[] => {
         const changedAbs = (changedSelectionAbs ?? []).map((absPath) =>
@@ -1249,6 +1253,7 @@ export const program = async (): Promise<void> => {
     const text = renderVitestFromJestJSON(unified as unknown as BridgeJSON, {
       cwd: repoRootForDiscovery,
       ...(editorCmd !== undefined ? { editorCmd } : {}),
+      onlyFailures,
     });
     if (text.trim().length > 0) {
       process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);

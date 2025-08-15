@@ -923,13 +923,14 @@ export const buildPerFileOverview = (
 
 export const formatJestOutputVitest = (
   raw: string,
-  opts?: { readonly cwd?: string; readonly editorCmd?: string },
+  opts?: { readonly cwd?: string; readonly editorCmd?: string; readonly onlyFailures?: boolean },
 ): string => {
   const showStacks = Boolean(env.TEST_CLI_STACKS);
   const cwd = (opts?.cwd ?? process.cwd()).replace(/\\/g, '/');
   const projectHint = new RegExp(
     `(${cwd.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')})|(/gigworx-node/)`,
   );
+  const onlyFailures = Boolean(opts?.onlyFailures);
   const lines = raw.split(/\r?\n/);
   const out: string[] = [];
   const seenFailures = new Set<string>();
@@ -1030,12 +1031,15 @@ export const formatJestOutputVitest = (
         continue;
       }
       seenFiles.add(rel);
-      const pill = badge === 'PASS' ? colorTokens.passPill('PASS') : colorTokens.failPill('FAIL');
-      out.push(`${pill} ${ansi.white(rel)}`);
+      if (!(onlyFailures && badge === 'PASS')) {
+        const pill = badge === 'PASS' ? colorTokens.passPill('PASS') : colorTokens.failPill('FAIL');
+        out.push(`${pill} ${ansi.white(rel)}`);
+      }
       lineIndex += 1;
       continue;
     }
     if (/^\s*(Test Suites:|Tests:|Snapshots:|Time:|Ran all)/.test(ln)) {
+      // Always show summary lines in live stream
       out.push(lines[lineIndex]!);
       lineIndex += 1;
       continue;
@@ -1244,24 +1248,31 @@ const vitestFooter = (
 
 export function renderVitestFromJestJSON(
   data: BridgeJSON,
-  opts?: { cwd?: string; editorCmd?: string },
+  opts?: { cwd?: string; editorCmd?: string; onlyFailures?: boolean },
 ): string {
   const cwd = (opts?.cwd ?? process.cwd()).replace(/\\/g, '/');
   const projectHint = new RegExp(
     `(${cwd.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')})|(/gigworx-node/)`,
   );
   const ctx: BuildCtx = { projectHint, editorCmd: opts?.editorCmd, showStacks: true };
+  const onlyFailures = Boolean(opts?.onlyFailures);
   const out: string[] = [];
   // Top RUN line
-  out.push(renderRunLine(cwd));
-  out.push('');
+  if (!onlyFailures) {
+    out.push(renderRunLine(cwd));
+    out.push('');
+  }
   for (const file of data.testResults) {
     const rel = file.testFilePath.replace(/\\/g, '/').replace(`${cwd}/`, '');
     const failed = file.testResults.filter((assertion) => assertion.status === 'failed');
     // Per-file overview list
-    out.push(...buildPerFileOverview(rel, file.testResults));
+    if (!onlyFailures) {
+      out.push(...buildPerFileOverview(rel, file.testResults));
+    }
     // File header block with PASS/FAIL badge
-    out.push(buildFileBadgeLine(rel, failed.length));
+    if (!(onlyFailures && failed.length === 0)) {
+      out.push(buildFileBadgeLine(rel, failed.length));
+    }
     // Only render file-level failure when there are NO per-assertion failures
     if (file.failureMessage && failed.length === 0) {
       const lines = file.failureMessage.split(/\r?\n/);
@@ -1337,7 +1348,7 @@ export function renderVitestFromJestJSON(
       out.push('');
     }
   }
-  // Dashed rule + right-aligned pill
+  // Dashed rule + right-aligned pill (always show final summary)
   const failedCount = data.aggregated.numFailedTests;
   out.push(drawRule(colorTokens.failPill(` Failed Tests ${failedCount} `)));
   out.push('');
