@@ -1,6 +1,6 @@
 {
   "name": "headlamp",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Coverage-first, runner-agnostic test UX CLI for Jest",
   "type": "module",
   "main": "dist/index.js",

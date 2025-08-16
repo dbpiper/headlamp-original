@@ -31,3 +31,32 @@ export type BridgeJSON = {
     readonly runTimeMs?: number;
   };
 };
+
+export type HttpEvent = {
+  readonly timestampMs: number;
+  readonly kind?: 'response' | 'abort';
+  readonly method?: string;
+  readonly url?: string;
+  readonly route?: string;
+  readonly statusCode?: number;
+  readonly durationMs?: number;
+  readonly contentType?: string;
+  readonly requestId?: string;
+  readonly json?: unknown;
+  readonly bodyPreview?: string;
+  readonly testPath?: string;
+  readonly currentTestName?: string;
+};
+
+export type AssertionEvt = {
+  readonly timestampMs?: number;
+  readonly matcher?: string;
+  readonly expectedNumber?: number;
+  readonly receivedNumber?: number;
+  readonly message?: string;
+  readonly stack?: string;
+  readonly testPath?: string;
+  readonly currentTestName?: string;
+  readonly expectedPreview?: string;
+  readonly actualPreview?: string;
+};
