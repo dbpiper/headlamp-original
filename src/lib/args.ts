@@ -23,7 +23,8 @@ export type Action =
   | { readonly type: 'coverageMaxFiles'; readonly value: number }
   | { readonly type: 'coverageMaxHotspots'; readonly value: number }
   | { readonly type: 'coveragePageFit'; readonly value: boolean }
-  | { readonly type: 'changed'; readonly value: ChangedMode };
+  | { readonly type: 'changed'; readonly value: ChangedMode }
+  | { readonly type: 'changedDepth'; readonly value: number };
 
 export const ActionBuilders = {
   coverage: (coverageValue: boolean): Action => ({ type: 'coverage', coverageValue }),
@@ -48,6 +49,7 @@ export const ActionBuilders = {
   coverageMaxHotspots: (value: number): Action => ({ type: 'coverageMaxHotspots', value }),
   coveragePageFit: (value: boolean): Action => ({ type: 'coveragePageFit', value }),
   changed: (value: ChangedMode): Action => ({ type: 'changed', value }),
+  changedDepth: (value: number): Action => ({ type: 'changedDepth', value }),
 } as const;
 
 type State = { actions: Action[]; skipNext: boolean };
@@ -316,6 +318,17 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
       return step([ActionBuilders.changed(mode)], true);
     }),
 
+    // --changed.depth flag: maximum transitive import depth for changed selection refinement
+    rule.startsWith('--changed.depth=', (value) => {
+      const raw = (value.split('=')[1] ?? '').trim();
+      const num = Number(raw);
+      return step(Number.isFinite(num) && num > 0 ? [ActionBuilders.changedDepth(num)] : []);
+    }),
+    rule.withLookahead('--changed.depth', (_flag, lookahead) => {
+      const num = Number(String(lookahead).trim());
+      return step(Number.isFinite(num) && num > 0 ? [ActionBuilders.changedDepth(num)] : [], true);
+    }),
+
     rule.withLookahead('-t', (flag, lookahead) =>
       step(
         [
@@ -409,6 +422,7 @@ export type ParsedArgs = {
   readonly coverageMaxHotspots?: number;
   readonly coveragePageFit: boolean;
   readonly changed?: ChangedMode;
+  readonly changedDepth?: number;
 };
 
 type Contrib = {
@@ -431,6 +445,7 @@ type Contrib = {
   readonly coverageMaxHotspots?: number;
   readonly coveragePageFit?: boolean;
   readonly changed?: ChangedMode;
+  readonly changedDepth?: number;
 };
 
 const emptyContrib: Contrib = {
@@ -481,6 +496,8 @@ const toContrib = (action: Action): Contrib => {
       return { vitest: [], jest: [], coverage: false, coveragePageFit: action.value };
     case 'changed':
       return { vitest: [], jest: [], coverage: false, changed: action.value };
+    case 'changedDepth':
+      return { vitest: [], jest: [], coverage: false, changedDepth: action.value };
     case 'jestArg':
       return { vitest: [], jest: [action.value], coverage: false };
     case 'vitestArg':
@@ -523,6 +540,9 @@ export const combineContrib = (left: Contrib, right: Contrib): Contrib => {
     ...next,
     ...(right.changed !== undefined || left.changed !== undefined
       ? { changed: right.changed ?? left.changed }
+      : {}),
+    ...(right.changedDepth !== undefined || left.changedDepth !== undefined
+      ? { changedDepth: right.changedDepth ?? left.changedDepth }
       : {}),
     ...(right.coverageAbortOnFailure !== undefined || left.coverageAbortOnFailure !== undefined
       ? { coverageAbortOnFailure: right.coverageAbortOnFailure ?? left.coverageAbortOnFailure }
@@ -655,6 +675,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
     ...(contrib.editorCmd !== undefined ? { editorCmd: contrib.editorCmd } : {}),
     ...(contrib.workspaceRoot !== undefined ? { workspaceRoot: contrib.workspaceRoot } : {}),
     ...(contrib.changed !== undefined ? { changed: contrib.changed } : {}),
+    ...(contrib.changedDepth !== undefined ? { changedDepth: contrib.changedDepth } : {}),
   };
   return out;
 };

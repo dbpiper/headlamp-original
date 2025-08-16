@@ -83,6 +83,8 @@ npx headlamp --changed --onlyFailures
   - Effects:
     - Uses changed production files as seeds to discover related tests by import-graph.
     - Coverage tables prioritize and annotate files related to selection/changed files.
+  - Additional flags:
+    - `--changed.depth=<n>`: cap the transitive import scan depth when refining related tests from changed production files. Default: 5. Increase to include more indirectly-related tests (slower), decrease for speed.
 
 Examples:
 
@@ -98,6 +100,16 @@ npx headlamp --changed=branch
 
 # Combine with coverage
 npx headlamp --coverage --changed=branch
+```
+
+Depth examples:
+
+```bash
+# Scan imports up to 10 levels deep when resolving related tests for changed files
+npx headlamp --changed=all --changed.depth=10
+
+# With branch mode
+npx headlamp --changed=branch --changed.depth=12
 ```
 
 ## Coverage flags

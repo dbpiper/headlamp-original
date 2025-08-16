@@ -425,6 +425,7 @@ export const program = async (): Promise<void> => {
     coverageMaxHotspots: coverageMaxHotspotsArg,
     coveragePageFit,
     changed,
+    changedDepth,
   } = deriveArgs(argv);
   // Derive changed-file selection (staged/unstaged/all) when requested
   const getChangedFiles = async (
@@ -1004,7 +1005,10 @@ export const program = async (): Promise<void> => {
         return resolved;
       };
 
-      const MAX_DEPTH = 5;
+      const MAX_DEPTH =
+        Number.isFinite(Number(changedDepth)) && Number(changedDepth) > 0
+          ? Number(changedDepth)
+          : 5;
       const seen = new Set<string>();
       const matchesTransitively = async (absTestPath: string, depth: number): Promise<boolean> => {
         if (depth > MAX_DEPTH) {
