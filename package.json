@@ -1,6 +1,6 @@
 {
   "name": "headlamp",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Coverage-first, runner-agnostic test UX CLI for Jest",
   "type": "module",
   "main": "dist/index.js",
@@ -40,6 +40,7 @@
     "istanbul-lib-coverage": "^3.2.2",
     "istanbul-lib-report": "^3.0.1",
     "istanbul-reports": "^3.1.7",
+    "json5": "^2.2.3",
     "picomatch": "^4.0.3"
   },
   "peerDependencies": {
@@ -47,7 +48,6 @@
     "vitest": "*"
   },
   "devDependencies": {
-    "nodemon": "^3.1.10",
     "@types/istanbul-reports": "^3.0.4",
     "@types/picomatch": "^4.0.2",
     "@typescript-eslint/eslint-plugin": "^8.37.0",
@@ -61,6 +61,7 @@
     "eslint-plugin-node-import": "^1.0.5",
     "eslint-plugin-prettier": "^5.2.1",
     "eslint-plugin-promise": "^6.1.1",
+    "nodemon": "^3.1.10",
     "prettier": "^3.3.3",
     "tslib": "^2.6.3",
     "typescript": "^5.5.4",

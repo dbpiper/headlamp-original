@@ -25,13 +25,15 @@ import {
   printCompactCoverage,
   printDetailedCoverage,
 } from './coverage-print';
+import { JEST_BRIDGE_REPORTER_SOURCE } from './jest-reporter-source';
+import { JEST_BRIDGE_ENV_SOURCE } from './jest-environment-source';
+import { formatJestOutputVitest } from './formatJestOutputVitest';
 import {
-  JEST_BRIDGE_REPORTER_SOURCE,
   renderVitestFromJestJSON,
   coerceJestJsonToBridge,
-  formatJestOutputVitest,
   type BridgeJSON,
-} from './jest-bridge';
+} from './formatter/bridge';
+import { makeCtx } from './formatter/context';
 import { stripAnsiSimple } from './stacks';
 import { tintPct } from './bars';
 import { selectDirectTestsForProduction } from './graph-distance';
@@ -1151,9 +1153,30 @@ export const program = async (): Promise<void> => {
       );
       const reporterPath = path.resolve('scripts/jest-vitest-bridge.cjs');
       try {
-        if (!fsSync.existsSync(reporterPath)) {
+        const needsWrite = (() => {
+          try {
+            const existing = fsSync.readFileSync(reporterPath, 'utf8');
+            return existing !== JEST_BRIDGE_REPORTER_SOURCE;
+          } catch {
+            return true;
+          }
+        })();
+        if (needsWrite) {
           fsSync.mkdirSync(path.dirname(reporterPath), { recursive: true });
           fsSync.writeFileSync(reporterPath, JEST_BRIDGE_REPORTER_SOURCE, 'utf8');
+        }
+        // ensure environment file exists
+        const envPath = path.resolve('scripts/jest-bridge-env.cjs');
+        try {
+          const existingEnv = fsSync.readFileSync(envPath, 'utf8');
+          if (existingEnv !== JEST_BRIDGE_ENV_SOURCE) {
+            fsSync.writeFileSync(envPath, JEST_BRIDGE_ENV_SOURCE, 'utf8');
+          }
+        } catch {
+          try {
+            fsSync.mkdirSync(path.dirname(envPath), { recursive: true });
+          } catch {}
+          fsSync.writeFileSync(envPath, JEST_BRIDGE_ENV_SOURCE, 'utf8');
         }
       } catch (ensureReporterError) {
         console.warn(`Unable to ensure jest bridge reporter: ${String(ensureReporterError)}`);
@@ -1181,13 +1204,12 @@ export const program = async (): Promise<void> => {
           jestBin,
           '--config',
           cfg,
+          '--testLocationInResults',
           '--runTestsByPath',
           `--reporters=${reporterPath}`,
-          '--silent',
           '--colors',
-          '--json',
-          '--outputFile',
-          outJson,
+          '--env',
+          path.resolve('scripts/jest-bridge-env.cjs'),
           ...sanitizedJestRunArgs,
           ...(collectCoverage
             ? [
@@ -1227,17 +1249,23 @@ export const program = async (): Promise<void> => {
             ...bridge,
             testResults: sortTestResultsWithRank(fileRank, bridge.testResults).reverse(),
           } as typeof bridge;
-          pretty = renderVitestFromJestJSON(reordered, {
-            cwd: repoRootForDiscovery,
-            ...(editorCmd !== undefined ? { editorCmd } : {}),
-            onlyFailures,
-          });
+          pretty = renderVitestFromJestJSON(
+            reordered,
+            makeCtx(
+              { cwd: repoRootForDiscovery, ...(editorCmd !== undefined ? { editorCmd } : {}) },
+              /\bFAIL\b/.test(stripAnsiSimple(output)),
+            ),
+            { onlyFailures },
+          );
         } catch {
-          pretty = renderVitestFromJestJSON(bridge, {
-            cwd: repoRootForDiscovery,
-            ...(editorCmd !== undefined ? { editorCmd } : {}),
-            onlyFailures,
-          });
+          pretty = renderVitestFromJestJSON(
+            bridge,
+            makeCtx(
+              { cwd: repoRootForDiscovery, ...(editorCmd !== undefined ? { editorCmd } : {}) },
+              /\bFAIL\b/.test(stripAnsiSimple(output)),
+            ),
+            { onlyFailures },
+          );
         }
         if (debug) {
           const preview = pretty.split('\n').slice(0, 3).join('\n');
@@ -1250,16 +1278,33 @@ export const program = async (): Promise<void> => {
           console.info(String(jsonErr));
           console.info(`fallback: raw output lines=${output.split(/\r?\n/).length}`);
         }
-        const renderOpts = {
+        pretty = formatJestOutputVitest(output, {
           cwd: repoRootForDiscovery,
           ...(editorCmd !== undefined ? { editorCmd } : {}),
           onlyFailures,
-        } as const;
-        pretty = formatJestOutputVitest(output, renderOpts);
+        });
         if (debug) {
           const preview = pretty.split('\n').slice(0, 3).join('\n');
           console.info(`pretty preview (text):\n${preview}${pretty.includes('\n') ? '\n…' : ''}`);
         }
+      }
+      // If the bridge output still looks sparse (common `Error:` with no detail),
+      // append raw text rendering as an extra hint source.
+      try {
+        const looksSparse =
+          /\n\s*Error:\s*\n/.test(pretty) &&
+          !/(Message:|Thrown:|Events:|Console errors:)/.test(pretty);
+        if (looksSparse) {
+          const rawAlso = formatJestOutputVitest(output, {
+            cwd: repoRootForDiscovery,
+            ...(editorCmd !== undefined ? { editorCmd } : {}),
+            onlyFailures,
+          });
+          const merged = `${stripFooter(pretty)}\n${stripFooter(rawAlso)}`.trimEnd();
+          pretty = merged;
+        }
+      } catch {
+        /* ignore raw merge failures */
       }
       // Always drop per-project footer; we'll print a unified summary later
       pretty = stripFooter(pretty);
@@ -1325,11 +1370,21 @@ export const program = async (): Promise<void> => {
     } catch {
       // ignore relevance sorting on failure
     }
-    const text = renderVitestFromJestJSON(unified as unknown as BridgeJSON, {
-      cwd: repoRootForDiscovery,
-      ...(editorCmd !== undefined ? { editorCmd } : {}),
-      onlyFailures,
-    });
+    const showStacks = Boolean((unified as any).aggregated?.numFailedTests > 0);
+    let text = renderVitestFromJestJSON(
+      unified as unknown as BridgeJSON,
+      makeCtx(
+        { cwd: repoRootForDiscovery, ...(editorCmd !== undefined ? { editorCmd } : {}) },
+        showStacks,
+      ),
+      { onlyFailures },
+    );
+    if (onlyFailures) {
+      text = text
+        .split(/\r?\n/)
+        .filter((line) => !/^\s*PASS\b/.test(stripAnsiSimple(line)))
+        .join('\n');
+    }
     if (text.trim().length > 0) {
       process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
     }
