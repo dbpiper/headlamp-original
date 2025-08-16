@@ -562,15 +562,27 @@ export const buildMessageSection = (
   const fallbackLines: string[] = [];
   if (hasOnlyBareError) {
     const startFrom = hintIdx >= 0 ? hintIdx + 1 : 0;
+    let started = false;
     for (let i = startFrom; i < lines.length; i += 1) {
       const candidate = lines[i]!;
-      if (!candidate.trim()) {
-        break;
-      }
       if (isStackLine(candidate)) {
         break;
       }
+      if (!candidate.trim()) {
+        if (!started) {
+          // Skip leading blank lines after the bare Error:
+          // Keep scanning for the first informative line
+          // before deciding to stop.
+          // eslint-disable-next-line no-continue
+          continue;
+        }
+        break;
+      }
+      started = true;
       fallbackLines.push(candidate);
+      if (fallbackLines.length >= 6) {
+        break;
+      }
     }
     if (fallbackLines.length === 0 && details && details.messages && details.messages.length) {
       // Use messages extracted from failureDetails as a secondary fallback
@@ -652,7 +664,9 @@ export const linesFromDetails = (
     if (typeof obj.received === 'string') {
       pushMaybe(obj.received, messages);
     }
-    const arrays = ['errors', 'causes', 'aggregatedErrors'];
+    // Explore common validation collections:
+    // Sequelize (errors), Joi (details), Zod (issues), Yup (inner)
+    const arrays = ['errors', 'details', 'issues', 'inner', 'causes', 'aggregatedErrors'];
     for (const key of arrays) {
       const arr = obj[key as keyof typeof obj] as unknown;
       if (Array.isArray(arr)) {
@@ -661,7 +675,8 @@ export const linesFromDetails = (
         }
       }
     }
-    const nestedCandidates = ['error', 'cause', 'matcherResult'];
+    // Also traverse common nested containers
+    const nestedCandidates = ['error', 'cause', 'matcherResult', 'context', 'data'];
     for (const key of nestedCandidates) {
       if (obj[key] && typeof obj[key] === 'object') {
         visitDeep(obj[key], depth + 1);
@@ -694,10 +709,8 @@ export const linesFromDetails = (
         pushMaybe(matcher.expected, messages);
         pushMaybe(matcher.received, messages);
       }
-      // Deep search for any nested message/stack when standard fields are absent
-      if (messages.length === 0 && stacks.length === 0) {
-        visitDeep(detail, 0);
-      }
+      // Always deep-search to capture validation details nested inside arrays/causes
+      visitDeep(detail, 0);
     }
   }
   return { stacks, messages };
@@ -790,25 +803,34 @@ export const buildFallbackMessageBlock = (
   const normalize = (arr: readonly string[]) =>
     arr.map((lineText) => stripAnsiSimple(lineText)).filter((line) => line.trim().length > 0);
   const normalized = normalize(messageLines);
-  const informative = normalized.filter((line) => !/^\s*(?:Error|AssertionError):?\s*$/.test(line));
+  const informative = normalized.filter(
+    (line) => !/^\s*(?:Error|AssertionError):?\s*$/i.test(line),
+  );
   // If caller already has informative lines, they don't need this fallback
   if (informative.length > 0) {
     return [];
   }
   const errorIdx = normalized.findIndex((line) =>
-    /(TypeError|ReferenceError|SyntaxError|RangeError|AssertionError|Error):?/.test(line),
+    /(TypeError|ReferenceError|SyntaxError|RangeError|AssertionError|Error):?/i.test(line),
   );
   const collected: string[] = [];
   if (errorIdx >= 0) {
-    for (let i = errorIdx; i < normalized.length && collected.length < 8; i += 1) {
-      const ln = normalized[i]!;
-      if (!ln.trim()) {
+    // Skip the bare error header line; then skip leading blanks until the first informative line
+    let started = false;
+    for (let i = errorIdx + 1; i < messageLines.length && collected.length < 8; i += 1) {
+      const raw = stripAnsiSimple(messageLines[i]!);
+      if (isStackLine(raw)) {
         break;
       }
-      if (isStackLine(ln)) {
+      if (!raw.trim()) {
+        if (!started) {
+          // eslint-disable-next-line no-continue
+          continue;
+        }
         break;
       }
-      collected.push(ln);
+      started = true;
+      collected.push(raw);
     }
   }
   const fromDetails = collected.length > 0 ? [] : normalize(details.messages).slice(0, 6);

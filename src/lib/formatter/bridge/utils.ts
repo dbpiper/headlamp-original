@@ -1,13 +1,10 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-
 // eslint-disable-next-line import/no-extraneous-dependencies
 import JSON5 from 'json5';
 
-import { ansi, osc8 } from '../ansi';
-import { Colors, BackgroundColors } from '../colors';
-import type { Ctx } from './context';
-import { collapseStacks, stripAnsiSimple, isStackLine } from '../stacks';
+import { ansi, osc8 } from '../../ansi';
+import { Colors, BackgroundColors } from '../../colors';
+import type { Ctx } from '../context';
+import { collapseStacks, stripAnsiSimple, isStackLine } from '../../stacks';
 import {
   drawRule,
   buildPerFileOverview,
@@ -21,8 +18,98 @@ import {
   buildConsoleSection,
   colorStackLine,
   buildThrownSection,
-} from './fns';
-import { preferredEditorHref } from '../paths';
+} from '../fns';
+import { preferredEditorHref } from '../../paths';
+import type { BridgeJSON } from './types';
+import {
+  parseMethodPathFromTitle,
+  pickRelevantHttp,
+  isTransportError,
+  HEADLAMP_HTTP_WINDOW_MS,
+  HEADLAMP_HTTP_DIFF_LIMIT,
+  HEADLAMP_HTTP_SHOW_MISS,
+} from './logic';
+
+export const coerceJestJsonToBridge = (raw: unknown): BridgeJSON => {
+  if (raw && typeof raw === 'object' && 'aggregated' in (raw as Record<string, unknown>)) {
+    return raw as BridgeJSON;
+  }
+  type JestAssertionResult = {
+    readonly title: string;
+    readonly ancestorTitles: string[];
+    readonly status: string;
+    readonly location?: { readonly line: number; readonly column: number } | null;
+    readonly failureMessages?: string[];
+    readonly failureDetails?: readonly unknown[];
+    readonly fullName?: string;
+    readonly duration?: number;
+  };
+  type JestTestResult = {
+    readonly testFilePath?: string;
+    readonly name?: string;
+    readonly status: 'passed' | 'failed';
+    readonly failureMessage?: string;
+    readonly assertionResults?: readonly JestAssertionResult[];
+    readonly failureDetails?: readonly unknown[];
+    readonly console?: ReadonlyArray<{
+      message?: unknown;
+      type?: unknown;
+      origin?: unknown;
+    }> | null;
+    readonly perfStats?: Readonly<Record<string, unknown>>;
+  };
+  type JestAggregatedResult = {
+    readonly startTime: number;
+    readonly success: boolean;
+    readonly numTotalTestSuites: number;
+    readonly numPassedTestSuites: number;
+    readonly numFailedTestSuites: number;
+    readonly numTotalTests: number;
+    readonly numPassedTests: number;
+    readonly numFailedTests: number;
+    readonly numPendingTests: number;
+    readonly numTodoTests: number;
+    readonly testResults: readonly JestTestResult[];
+  };
+  const j = raw as JestAggregatedResult;
+  if (!j || !Array.isArray(j.testResults)) {
+    throw new Error('Unexpected Jest JSON shape');
+  }
+  return {
+    startTime: Number(j.startTime ?? Date.now()),
+    testResults: j.testResults.map((tr) => ({
+      testFilePath: tr.testFilePath || tr.name || '',
+      status: tr.status,
+      failureMessage: tr.failureMessage || '',
+      failureDetails: tr.failureDetails ?? [],
+      testExecError: (tr as any).testExecError ?? null,
+      console: tr.console ?? null,
+      testResults: (tr.assertionResults || []).map((assertion: JestAssertionResult) => ({
+        title: assertion.title,
+        fullName:
+          assertion.fullName || [...(assertion.ancestorTitles || []), assertion.title].join(' '),
+        status: assertion.status,
+        duration: assertion.duration || 0,
+        location: assertion.location ?? null,
+        failureMessages: assertion.failureMessages || [],
+        failureDetails: assertion.failureDetails || [],
+      })),
+    })),
+    aggregated: {
+      numTotalTestSuites: (raw as any).numTotalTestSuites,
+      numPassedTestSuites: (raw as any).numPassedTestSuites,
+      numFailedTestSuites: (raw as any).numFailedTestSuites,
+      numTotalTests: (raw as any).numTotalTests,
+      numPassedTests: (raw as any).numPassedTests,
+      numFailedTests: (raw as any).numFailedTests,
+      numPendingTests: (raw as any).numPendingTests,
+      numTodoTests: (raw as any).numTodoTests,
+      startTime: (raw as any).startTime,
+      success: (raw as any).success,
+      runTimeMs: (raw as any).aggregated?.runTimeMs,
+    },
+  };
+};
 
 const colorTokens = {
   pass: Colors.Success,
@@ -33,9 +120,7 @@ const colorTokens = {
   failPill: (text: string) => BackgroundColors.Failure(ansi.white(` ${text} `)),
 };
 
-// ---- HTTP Crash Card helpers ----
-
-export type HttpEvent = {
+type HttpEvent = {
   readonly timestampMs: number;
   readonly kind?: 'response' | 'abort';
   readonly method?: string;
@@ -51,7 +136,7 @@ export type HttpEvent = {
   readonly currentTestName?: string;
 };
 
-export type AssertionEvt = {
+type AssertionEvt = {
   readonly timestampMs?: number;
   readonly matcher?: string;
   readonly expectedNumber?: number;
@@ -97,39 +182,6 @@ const stripBridgeEventsFromConsole = (maybeConsole: unknown): unknown => {
   });
 };
 
-export const extractBridgePath = (raw: string, cwd: string): string | null => {
-  const matches = Array.from(
-    raw.matchAll(/Test results written to:\s+([^\n\r]+jest-bridge-[^\s'"]+\.json)/g),
-  );
-  if (!matches.length) {
-    return null;
-  }
-  const jsonPath = (matches[matches.length - 1][1] ?? '').trim().replace(/^["'`]|["'`]$/g, '');
-  return path.isAbsolute(jsonPath) ? jsonPath : path.resolve(cwd, jsonPath).replace(/\\/g, '/');
-};
-
-// ---- Transport classification and scoring helpers ----
-
-export const isTransportError = (msg?: string): boolean => {
-  const lowercaseMessage = (msg ?? '').toLowerCase();
-  return /\bsocket hang up\b|\beconnreset\b|\betimedout\b|\beconnrefused\b|\bwrite epipe\b/.test(
-    lowercaseMessage,
-  );
-};
-
-const envNumber = (name: string, fallback: number): number => {
-  const parsed = Number(process.env[name]);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-};
-
-// normal window for correlation; stricter window when it's a transport error
-const HEADLAMP_HTTP_WINDOW_MS = () => envNumber('HEADLAMP_HTTP_WINDOW_MS', 3000);
-const HEADLAMP_HTTP_STRICT_WINDOW_MS = () => envNumber('HEADLAMP_HTTP_STRICT_WINDOW_MS', 600);
-const HEADLAMP_HTTP_MIN_SCORE = () => envNumber('HEADLAMP_HTTP_MIN_SCORE', 1200);
-const HEADLAMP_HTTP_DIFF_LIMIT = (): number => envNumber('HEADLAMP_HTTP_DIFF_LIMIT', 6);
-const HEADLAMP_HTTP_SHOW_MISS = (): boolean => process.env.HEADLAMP_HTTP_MISS === '1';
-
-// Nearby events by time window (and optional same testPath)
 const eventsNear = (
   http: readonly HttpEvent[],
   ts?: number,
@@ -139,58 +191,16 @@ const eventsNear = (
   if (typeof ts !== 'number' || !Number.isFinite(ts)) {
     return [];
   }
-  return http.filter((e) => {
-    const timeOk = typeof e.timestampMs === 'number' && Math.abs(e.timestampMs - ts) <= windowMs;
-    const pathOk = !testPath || e.testPath === testPath;
+  return http.filter((event) => {
+    const timeOk =
+      typeof event.timestampMs === 'number' && Math.abs(event.timestampMs - ts) <= windowMs;
+    const pathOk = !testPath || event.testPath === testPath;
     return timeOk && pathOk;
   });
 };
 
-// tiny parser: "POST /api/v1/mobile/schedule/ShiftClockedIn ..."
-// -> { method:'POST', path:'/api/...'}
-export const parseMethodPathFromTitle = (title?: string): { method?: string; path?: string } => {
-  if (!title) {
-    return {};
-  }
-  const matchResult = title.match(/\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+([^\s)]+)/i);
-  return matchResult ? { method: matchResult[1]?.toUpperCase(), path: matchResult[2] } : {};
-};
-
-// ---- HTTP-likeness heuristics ----
-
 const isHttpStatusNumber = (statusNumber?: number): boolean =>
   typeof statusNumber === 'number' && statusNumber >= 100 && statusNumber <= 599;
-
-const hasStatusSemantics = (assertionLike?: {
-  readonly matcher?: string;
-  readonly message?: string;
-  readonly expectedNumber?: number;
-  readonly receivedNumber?: number;
-}): boolean => {
-  if (!assertionLike) {
-    return false;
-  }
-  if (
-    isHttpStatusNumber(assertionLike.expectedNumber) ||
-    isHttpStatusNumber(assertionLike.receivedNumber)
-  ) {
-    return true;
-  }
-  const combinedRaw = `${assertionLike.matcher ?? ''} ${assertionLike.message ?? ''}`;
-  const combinedMessage = combinedRaw.toLowerCase();
-  return /\bstatus(code)?\b|\btohaves(tatus|tatuscode)\b/.test(combinedMessage);
-};
-
-const fileSuggestsHttp = (relPath: string): boolean =>
-  /(?:^|\/)(routes?|api|controllers?|e2e|integration)(?:\/|\.test\.)/i.test(relPath);
-
-type HttpRelevanceCtx = {
-  readonly assertion?: AssertionEvt;
-  readonly title?: string;
-  readonly relPath: string;
-  readonly httpCountInSameTest: number;
-  readonly hasTransportSignal: boolean;
-};
 
 const inferHttpNumbersFromText = (
   lines: string[],
@@ -208,249 +218,36 @@ const titleSuggestsHttp = (title?: string): boolean => {
   return Boolean(method || (parsedPath && parsedPath.startsWith('/')));
 };
 
-const isHttpRelevant = (ctx: HttpRelevanceCtx): boolean => {
-  const assertionCtx = ctx.assertion;
-  return (
-    ctx.hasTransportSignal ||
-    ctx.httpCountInSameTest > 0 ||
-    titleSuggestsHttp(ctx.title) ||
-    hasStatusSemantics(assertionCtx) ||
-    fileSuggestsHttp(ctx.relPath)
-  );
+const hasStatusSemantics = (assertionLike?: AssertionEvt): boolean => {
+  if (!assertionLike) {
+    return false;
+  }
+  if (
+    isHttpStatusNumber(assertionLike.expectedNumber) ||
+    isHttpStatusNumber(assertionLike.receivedNumber)
+  ) {
+    return true;
+  }
+  const combinedRaw = `${assertionLike.matcher ?? ''} ${assertionLike.message ?? ''}`;
+  const combinedMessage = combinedRaw.toLowerCase();
+  return /\bstatus(code)?\b|\btohaves(tatus|tatuscode)\b/.test(combinedMessage);
 };
 
-// similarity: exact route match >> url contains path prefix >> none
-export const routeSimilarityScore = (
-  hint: { method?: string; path?: string },
-  evt: { method?: string; route?: string; url?: string },
-): number => {
-  if (!hint.path && !hint.method) {
-    return 0;
-  }
-  const methodOk = hint.method && evt.method ? Number(hint.method === evt.method) : 0;
-  const route = evt.route || evt.url || '';
-  if (!route) {
-    return methodOk * 10;
-  }
-  if (hint.path && route === hint.path) {
-    return 500 + methodOk * 50;
-  }
-  if (hint.path && route.endsWith(hint.path)) {
-    return 300 + methodOk * 50;
-  }
-  if (hint.path && route.includes(hint.path)) {
-    return 200 + methodOk * 50;
-  }
-  return methodOk * 10;
-};
+const fileSuggestsHttp = (relPath: string): boolean =>
+  /(?:^|\/)(routes?|api|controllers?|e2e|integration)(?:\/|\.test\.)/i.test(relPath);
 
-export const scoreHttpForAssertion =
-  (assertion: AssertionEvt, titleHint: { method?: string; path?: string }) =>
-  (candidateEvent: HttpEvent): number => {
-    const tsA = assertion.timestampMs;
-    const tsH = candidateEvent.timestampMs;
-    const window = isTransportError(assertion.message)
-      ? HEADLAMP_HTTP_STRICT_WINDOW_MS()
-      : HEADLAMP_HTTP_WINDOW_MS();
-    const timeScore =
-      typeof tsA === 'number' && typeof tsH === 'number'
-        ? Math.max(0, window - Math.abs(tsA - tsH))
-        : 0;
-
-    const statusScore =
-      typeof assertion.receivedNumber === 'number' &&
-      candidateEvent.statusCode === assertion.receivedNumber
-        ? 1500
-        : typeof assertion.expectedNumber === 'number' &&
-            candidateEvent.statusCode === assertion.expectedNumber
-          ? 1200
-          : (candidateEvent.statusCode ?? 0) >= 400
-            ? 800
-            : 0;
-
-    const routeScore = routeSimilarityScore(titleHint, candidateEvent);
-    const specificity = candidateEvent.route ? 80 : candidateEvent.url ? 40 : 0;
-
-    return timeScore + statusScore + routeScore + specificity;
-  };
-
-export const pickRelevantHttp = (
-  assertion: AssertionEvt,
-  http: readonly HttpEvent[],
-  ctx: { readonly testPath?: string; readonly currentTestName?: string; readonly title?: string },
-): HttpEvent | undefined => {
-  const hint = parseMethodPathFromTitle(ctx.title);
-  const nameMatches = (leftName?: string, rightName?: string) =>
-    !!leftName &&
-    !!rightName &&
-    (leftName === rightName || leftName.includes(rightName) || rightName.includes(leftName));
-  const sameTest = (
-    leftCtx?: { testPath?: string; currentTestName?: string },
-    rightCtx?: { testPath?: string; currentTestName?: string },
-  ) =>
-    !!leftCtx &&
-    !!rightCtx &&
-    leftCtx.testPath === rightCtx.testPath &&
-    nameMatches(leftCtx.currentTestName, rightCtx.currentTestName);
-
-  const strictPool = http.filter(
-    (httpEvent) => sameTest(assertion as any, httpEvent as any) || sameTest(ctx, httpEvent as any),
-  );
-
-  const windowMs = isTransportError(assertion.message)
-    ? HEADLAMP_HTTP_STRICT_WINDOW_MS()
-    : HEADLAMP_HTTP_WINDOW_MS();
-
-  let pool = strictPool;
-  if (!pool.length) {
-    pool = http.filter(
-      (e) =>
-        e.testPath === ctx.testPath &&
-        typeof assertion.timestampMs === 'number' &&
-        typeof e.timestampMs === 'number' &&
-        Math.abs(e.timestampMs - assertion.timestampMs) <= windowMs,
-    );
-  }
-  if (!pool.length) {
-    pool = http.filter(
-      (e) =>
-        typeof assertion.timestampMs === 'number' &&
-        typeof e.timestampMs === 'number' &&
-        Math.abs(e.timestampMs - assertion.timestampMs) <= windowMs,
-    );
-  }
-  if (!pool.length) {
-    return undefined;
-  }
-
-  const scored = pool
-    .map((httpEvent) => ({ h: httpEvent, s: scoreHttpForAssertion(assertion, hint)(httpEvent) }))
-    .sort((leftScore, rightScore) => rightScore.s - leftScore.s);
-
-  const [best] = scored;
-  const threshold = isTransportError(assertion.message)
-    ? Math.max(HEADLAMP_HTTP_MIN_SCORE(), 1400)
-    : HEADLAMP_HTTP_MIN_SCORE();
-  return best && best.s >= threshold ? best.h : undefined;
-};
-
-export type BridgeJSON = {
-  readonly startTime: number;
-  readonly testResults: ReadonlyArray<{
-    readonly testFilePath: string;
-    readonly status: 'passed' | 'failed';
-    readonly failureMessage: string;
-    readonly failureDetails?: readonly unknown[];
-    readonly testExecError?: unknown | null;
-    readonly console?: ReadonlyArray<{ message?: string; type?: string; origin?: string }> | null;
-    readonly testResults: ReadonlyArray<{
-      readonly title: string;
-      readonly fullName: string;
-      readonly status: string;
-      readonly duration: number;
-      readonly location: { readonly line: number; readonly column: number } | null;
-      readonly failureMessages: string[];
-      readonly failureDetails?: readonly unknown[];
-    }>;
-  }>;
-  readonly aggregated: {
-    readonly numTotalTestSuites: number;
-    readonly numPassedTestSuites: number;
-    readonly numFailedTestSuites: number;
-    readonly numTotalTests: number;
-    readonly numPassedTests: number;
-    readonly numFailedTests: number;
-    readonly numPendingTests: number;
-    readonly numTodoTests: number;
-    readonly startTime: number;
-    readonly success: boolean;
-    readonly runTimeMs?: number;
-  };
-};
-
-type JestAssertionResult = {
-  readonly title: string;
-  readonly ancestorTitles: string[];
-  readonly status: string;
-  readonly location?: { readonly line: number; readonly column: number } | null;
-  readonly failureMessages?: string[];
-  readonly failureDetails?: readonly unknown[];
-  readonly fullName?: string;
-  readonly duration?: number;
-};
-
-type JestTestResult = {
-  readonly testFilePath?: string;
-  readonly name?: string;
-  readonly status: 'passed' | 'failed';
-  readonly failureMessage?: string;
-  readonly assertionResults?: readonly JestAssertionResult[];
-  readonly failureDetails?: readonly unknown[];
-  readonly console?: ReadonlyArray<{ message?: unknown; type?: unknown; origin?: unknown }> | null;
-  readonly perfStats?: Readonly<Record<string, unknown>>;
-};
-
-type JestAggregatedResult = {
-  readonly startTime: number;
-  readonly success: boolean;
-  readonly numTotalTestSuites: number;
-  readonly numPassedTestSuites: number;
-  readonly numFailedTestSuites: number;
-  readonly numTotalTests: number;
-  readonly numPassedTests: number;
-  readonly numFailedTests: number;
-  readonly numPendingTests: number;
-  readonly numTodoTests: number;
-  readonly testResults: readonly JestTestResult[];
-};
-
-const isBridgeJSONLike = (candidateValue: unknown): candidateValue is BridgeJSON =>
-  !!candidateValue &&
-  typeof candidateValue === 'object' &&
-  'aggregated' in (candidateValue as Record<string, unknown>);
-
-export const coerceJestJsonToBridge = (raw: unknown): BridgeJSON => {
-  if (isBridgeJSONLike(raw)) {
-    return raw as BridgeJSON;
-  }
-  const j = raw as JestAggregatedResult;
-  if (!j || !Array.isArray(j.testResults)) {
-    throw new Error('Unexpected Jest JSON shape');
-  }
-  return {
-    startTime: Number(j.startTime ?? Date.now()),
-    testResults: j.testResults.map((tr) => ({
-      testFilePath: tr.testFilePath || tr.name || '',
-      status: tr.status,
-      failureMessage: tr.failureMessage || '',
-      failureDetails: tr.failureDetails ?? [],
-      testExecError: (tr as any).testExecError ?? null,
-      console: tr.console ?? null,
-      testResults: (tr.assertionResults || []).map((assertion: JestAssertionResult) => ({
-        title: assertion.title,
-        fullName:
-          assertion.fullName || [...(assertion.ancestorTitles || []), assertion.title].join(' '),
-        status: assertion.status,
-        duration: assertion.duration || 0,
-        location: assertion.location ?? null,
-        failureMessages: assertion.failureMessages || [],
-        failureDetails: assertion.failureDetails || [],
-      })),
-    })),
-    aggregated: {
-      numTotalTestSuites: j.numTotalTestSuites,
-      numPassedTestSuites: j.numPassedTestSuites,
-      numFailedTestSuites: j.numFailedTestSuites,
-      numTotalTests: j.numTotalTests,
-      numPassedTests: j.numPassedTests,
-      numFailedTests: j.numFailedTests,
-      numPendingTests: j.numPendingTests,
-      numTodoTests: j.numTodoTests,
-      startTime: j.startTime,
-      success: j.success,
-    },
-  };
-};
+const isHttpRelevant = (ctx: {
+  readonly assertion?: AssertionEvt;
+  readonly title?: string;
+  readonly relPath: string;
+  readonly httpCountInSameTest: number;
+  readonly hasTransportSignal: boolean;
+}): boolean =>
+  ctx.hasTransportSignal ||
+  ctx.httpCountInSameTest > 0 ||
+  titleSuggestsHttp(ctx.title) ||
+  hasStatusSemantics(ctx.assertion) ||
+  fileSuggestsHttp(ctx.relPath);
 
 const vitestFooter = (agg: BridgeJSON['aggregated'], durationMs?: number): string => {
   const files = [
@@ -1063,22 +860,4 @@ export const renderVitestFromJestJSON = (
   out.push('');
   out.push(vitestFooter(data.aggregated));
   return out.join('\n');
-};
-
-export const tryBridgeFallback = (
-  raw: string,
-  ctx: Ctx,
-  opts?: { readonly onlyFailures?: boolean },
-): string | null => {
-  const bridgeJsonPath = extractBridgePath(raw, ctx.cwd);
-  if (!bridgeJsonPath || !fs.existsSync(bridgeJsonPath)) {
-    return null;
-  }
-  try {
-    const json = JSON5.parse(fs.readFileSync(bridgeJsonPath, 'utf8'));
-    const bridge = coerceJestJsonToBridge(json);
-    return renderVitestFromJestJSON(bridge, ctx, opts);
-  } catch {
-    return null;
-  }
 };

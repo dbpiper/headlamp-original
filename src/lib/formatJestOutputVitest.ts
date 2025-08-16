@@ -22,21 +22,39 @@ export const formatJestOutputVitest = (raw: string, opts?: FormatOpts): string =
     (state) => ({ ...state, chunks: parseChunks(state.raw) }),
     (state) => ({
       ...state,
-      rendered: renderChunks(state.chunks, state.ctx, mkPrettyFns(), {
+      native: renderChunks(state.chunks, state.ctx, mkPrettyFns(), {
         onlyFailures: Boolean(state.opts?.onlyFailures),
-      }),
+      }).text,
+    }),
+    (state) => ({
+      ...state,
+      bridge:
+        tryBridgeFallback(state.raw, state.ctx, {
+          onlyFailures: Boolean(state.opts?.onlyFailures),
+        }) || null,
     }),
     (state) => {
-      if (state.rendered.hadParsed) {
-        return state.rendered.text;
+      const out: string[] = [];
+      const seen = new Set<string>();
+      const pushUnique = (text?: string | null) => {
+        if (!text) {
+          return;
+        }
+        for (const line of text.split(/\r?\n/)) {
+          const key = stripAnsiSimple(line);
+          if (!seen.has(key)) {
+            out.push(line);
+            seen.add(key);
+          }
+        }
+      };
+      pushUnique(state.native);
+      if (state.bridge) {
+        if (out.length) {
+          out.push('');
+        }
+        pushUnique(state.bridge);
       }
-      const fallback = tryBridgeFallback(state.raw, state.ctx, {
-        onlyFailures: Boolean(state.opts?.onlyFailures),
-      });
-      if (!fallback) {
-        return state.rendered.text;
-      }
-      const prefix = state.rendered.text;
-      return prefix ? `${prefix}\n${fallback}` : fallback;
+      return out.join('\n');
     },
   );
