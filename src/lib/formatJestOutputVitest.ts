@@ -10,6 +10,7 @@ export type FormatOpts = {
   readonly cwd?: string;
   readonly editorCmd?: string;
   readonly onlyFailures?: boolean;
+  readonly showLogs?: boolean;
 };
 
 export const formatJestOutputVitest = (raw: string, opts?: FormatOpts): string =>
@@ -17,7 +18,11 @@ export const formatJestOutputVitest = (raw: string, opts?: FormatOpts): string =
     { raw, opts },
     (state) => ({
       ...state,
-      ctx: makeCtx(state.opts, /\bFAIL\b/.test(stripAnsiSimple(state.raw))),
+      ctx: makeCtx(
+        state.opts,
+        /\bFAIL\b/.test(stripAnsiSimple(state.raw)),
+        Boolean(state.opts?.showLogs),
+      ),
     }),
     (state) => ({ ...state, chunks: parseChunks(state.raw) }),
     (state) => ({

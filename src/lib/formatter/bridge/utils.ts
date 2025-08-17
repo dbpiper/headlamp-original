@@ -278,7 +278,9 @@ export const renderFileLevelFailure = (
     suppressDiff: pretty.length > 0,
     stackPreview,
   });
-  const consoleBlock = buildConsoleSection(stripBridgeEventsFromConsole(file.console ?? null));
+  const consoleBlock = buildConsoleSection(stripBridgeEventsFromConsole(file.console ?? null), {
+    full: Boolean(ctx.showLogs),
+  });
 
   const stackTail: Lines =
     ctx.showStacks && stackPreview.length === 0
@@ -746,7 +748,9 @@ export const renderFailedAssertion = (args: {
       })()
     : empty;
 
-  const consoleBlock = buildConsoleSection(stripBridgeEventsFromConsole(file.console ?? null));
+  const consoleBlock = buildConsoleSection(stripBridgeEventsFromConsole(file.console ?? null), {
+    full: Boolean(ctx.showLogs),
+  });
 
   const stackTail: Lines =
     ctx.showStacks && stackPreview.length === 0

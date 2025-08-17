@@ -412,6 +412,7 @@ export const program = async (): Promise<void> => {
     coverageUi,
     coverageAbortOnFailure,
     onlyFailures,
+    showLogs,
     selectionSpecified,
     selectionPaths,
     includeGlobs,
@@ -1258,6 +1259,7 @@ export const program = async (): Promise<void> => {
             makeCtx(
               { cwd: repoRootForDiscovery, ...(editorCmd !== undefined ? { editorCmd } : {}) },
               /\bFAIL\b/.test(stripAnsiSimple(output)),
+              Boolean(showLogs),
             ),
             { onlyFailures },
           );
@@ -1267,6 +1269,7 @@ export const program = async (): Promise<void> => {
             makeCtx(
               { cwd: repoRootForDiscovery, ...(editorCmd !== undefined ? { editorCmd } : {}) },
               /\bFAIL\b/.test(stripAnsiSimple(output)),
+              Boolean(showLogs),
             ),
             { onlyFailures },
           );
@@ -1380,6 +1383,7 @@ export const program = async (): Promise<void> => {
       makeCtx(
         { cwd: repoRootForDiscovery, ...(editorCmd !== undefined ? { editorCmd } : {}) },
         showStacks,
+        Boolean(showLogs),
       ),
       { onlyFailures },
     );

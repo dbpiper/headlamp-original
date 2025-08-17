@@ -14,6 +14,7 @@ export type Ctx = {
   readonly width: number;
   readonly projectHint: RegExp;
   readonly showStacks: boolean;
+  readonly showLogs: boolean;
   readonly editorCmd: string | undefined;
   readonly readSource: SourceReader;
 };

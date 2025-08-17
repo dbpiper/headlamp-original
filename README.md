@@ -69,6 +69,22 @@ npx headlamp --onlyFailures
 npx headlamp --changed --onlyFailures
 ```
 
+- `--showLogs[=true|false]`:
+  - When enabled, Headlamp prints a dedicated "Logs" section under each failing test and failing file with the full console output captured by the runner.
+  - By default (without this flag), Headlamp shows a condensed "Console errors" snippet with only the most relevant error messages. `--showLogs` includes all console entries (log/info/warn/error).
+  - Supported forms: `--showLogs`, `--showLogs=true`, `--showLogs=false`.
+  - Works alongside `--onlyFailures`, coverage flags, and selection flags.
+
+Examples:
+
+```bash
+# Always include the full console output for each failure
+npx headlamp --showLogs
+
+# Combine with only failures visible during the run
+npx headlamp --onlyFailures --showLogs
+```
+
 ## Changed-file selection
 
 - `--changed[=mode]` selects tests by files changed in your working tree or branch.

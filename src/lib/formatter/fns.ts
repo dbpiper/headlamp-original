@@ -765,32 +765,58 @@ type ConsoleEntry = Readonly<{
 const isConsoleEntry = (candidate: unknown): candidate is ConsoleEntry =>
   typeof candidate === 'object' && candidate !== null;
 
-export const buildConsoleSection = (maybeConsole: unknown): string[] => {
+export const buildConsoleSection = (
+  maybeConsole: unknown,
+  opts?: { readonly full?: boolean },
+): string[] => {
   const out: string[] = [];
   if (!Array.isArray(maybeConsole)) {
     return out;
   }
   const entries = maybeConsole.filter(isConsoleEntry);
-  const errorsOnly = entries.filter((entry) => String(entry?.type ?? '').toLowerCase() === 'error');
-  const scored = errorsOnly
-    .map((entry) => {
+  if (opts?.full) {
+    const toMsg = (entry: ConsoleEntry): string => {
+      const type = String(entry?.type ?? '').toLowerCase();
       const raw = entry?.message as unknown;
       const msg = Array.isArray(raw)
         ? raw.map(String).join(' ')
         : typeof raw === 'string'
           ? raw
           : String(raw ?? '');
-      return { msg, score: msg.length };
-    })
-    .filter((item) => item.msg.trim().length > 0)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, MAX_CONSOLE_ERRORS_TO_SHOW);
-  if (scored.length) {
-    out.push(ansi.dim('    Console errors:'));
-    for (const item of scored) {
-      out.push(`      ${ansi.dim('•')} ${item.msg}`);
+      const origin = String(entry?.origin ?? '');
+      const typeFmt = type ? `${ansi.white(type)}: ` : '';
+      const originFmt = origin ? ` ${ansi.dim(`(${origin})`)}` : '';
+      return `      ${ansi.dim('•')} ${typeFmt}${msg}${originFmt}`;
+    };
+    const lines = entries.map(toMsg).filter((ln) => stripAnsiSimple(ln).trim().length > 0);
+    if (lines.length) {
+      out.push(ansi.dim('    Logs:'));
+      out.push(...lines, '');
     }
-    out.push('');
+  } else {
+    const errorsOnly = entries.filter(
+      (entry) => String(entry?.type ?? '').toLowerCase() === 'error',
+    );
+    const scored = errorsOnly
+      .map((entry) => {
+        const raw = entry?.message as unknown;
+        const msg = Array.isArray(raw)
+          ? raw.map(String).join(' ')
+          : typeof raw === 'string'
+            ? raw
+            : String(raw ?? '');
+        return { msg, score: msg.length };
+      })
+      .filter((item) => item.msg.trim().length > 0)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, MAX_CONSOLE_ERRORS_TO_SHOW);
+    if (scored.length) {
+      out.push(ansi.dim('    Console errors:'));
+      for (const item of scored) {
+        out.push(`      ${ansi.dim('•')} ${item.msg}`);
+      }
+      out.push('');
+    }
   }
   return out;
 };
@@ -863,8 +889,11 @@ export const buildThrownSection = (details: readonly unknown[]): string[] => {
     }
   };
   const candidates: string[] = [];
-  for (const d of details) {
-    const obj = d && typeof d === 'object' ? (d as Record<string, unknown>) : null;
+  for (const detailEntry of details) {
+    const obj =
+      detailEntry && typeof detailEntry === 'object'
+        ? (detailEntry as Record<string, unknown>)
+        : null;
     if (obj && obj.error && typeof obj.error === 'object') {
       const err = obj.error as Record<string, unknown>;
       if (typeof err.name === 'string') {

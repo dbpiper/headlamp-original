@@ -7,6 +7,7 @@ export type Action =
   | { readonly type: 'coverageUi'; readonly value: 'jest' | 'both' }
   | { readonly type: 'coverageAbortOnFailure'; readonly value: boolean }
   | { readonly type: 'onlyFailures'; readonly value: boolean }
+  | { readonly type: 'showLogs'; readonly value: boolean }
   | { readonly type: 'jestArg'; readonly value: string }
   | { readonly type: 'jestArgs'; readonly values: readonly string[] }
   | { readonly type: 'vitestArg'; readonly value: string }
@@ -31,6 +32,7 @@ export const ActionBuilders = {
   coverageUi: (value: 'jest' | 'both'): Action => ({ type: 'coverageUi', value }),
   coverageAbortOnFailure: (value: boolean): Action => ({ type: 'coverageAbortOnFailure', value }),
   onlyFailures: (value: boolean): Action => ({ type: 'onlyFailures', value }),
+  showLogs: (value: boolean): Action => ({ type: 'showLogs', value }),
   jestArg: (value: string): Action => ({ type: 'jestArg', value }),
   jestArgs: (values: readonly string[]): Action => ({ type: 'jestArgs', values }),
   vitestArg: (value: string): Action => ({ type: 'vitestArg', value }),
@@ -223,6 +225,15 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
       step([ActionBuilders.onlyFailures(isTruthy(String(lookahead)))], true),
     ),
 
+    // --showLogs flag (boolean)
+    rule.eq('--showLogs', () => step([ActionBuilders.showLogs(true)])),
+    rule.startsWith('--showLogs=', (value) =>
+      step([ActionBuilders.showLogs(isTruthy((value.split('=')[1] ?? '').trim().toLowerCase()))]),
+    ),
+    rule.withLookahead('--showLogs', (_flag, lookahead) =>
+      step([ActionBuilders.showLogs(isTruthy(String(lookahead)))], true),
+    ),
+
     rule.withLookahead('--testPathPattern', (flag, lookahead) =>
       step([ActionBuilders.jestArgs([flag, lookahead])], true),
     ),
@@ -409,6 +420,7 @@ export type ParsedArgs = {
   readonly coverageUi: 'jest' | 'both';
   readonly coverageAbortOnFailure: boolean;
   readonly onlyFailures: boolean;
+  readonly showLogs: boolean;
   readonly selectionSpecified: boolean;
   readonly selectionPaths: readonly string[];
   readonly includeGlobs: readonly string[];
@@ -432,6 +444,7 @@ type Contrib = {
   readonly coverageUi?: ParsedArgs['coverageUi'];
   readonly coverageAbortOnFailure?: boolean;
   readonly onlyFailures?: boolean;
+  readonly showLogs?: boolean;
   readonly selection?: boolean;
   readonly include?: readonly string[];
   readonly exclude?: readonly string[];
@@ -466,6 +479,8 @@ const toContrib = (action: Action): Contrib => {
       return { vitest: [], jest: [], coverage: false, coverageAbortOnFailure: action.value };
     case 'onlyFailures':
       return { vitest: [], jest: [], coverage: false, onlyFailures: action.value };
+    case 'showLogs':
+      return { vitest: [], jest: [], coverage: false, showLogs: action.value };
     case 'jestArgs':
       return { vitest: [], jest: action.values, coverage: false };
     case 'selectionHint':
@@ -550,6 +565,9 @@ export const combineContrib = (left: Contrib, right: Contrib): Contrib => {
     ...(right.onlyFailures !== undefined || left.onlyFailures !== undefined
       ? { onlyFailures: right.onlyFailures ?? left.onlyFailures }
       : {}),
+    ...(right.showLogs !== undefined || left.showLogs !== undefined
+      ? { showLogs: right.showLogs ?? left.showLogs }
+      : {}),
     ...(right.coverageDetail !== undefined || left.coverageDetail !== undefined
       ? { coverageDetail: right.coverageDetail ?? left.coverageDetail }
       : {}),
@@ -588,6 +606,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
   let coverageUi: ParsedArgs['coverageUi'] = 'both';
   let coverageAbortOnFailure = false;
   let onlyFailures = false;
+  let showLogs = false;
   let coverageShowCode = Boolean(process.stdout.isTTY);
   let coverageMode: ParsedArgs['coverageMode'] = 'auto';
   const coverageMaxFilesLocalInit: number | undefined = undefined;
@@ -608,6 +627,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
   coverageUi = contrib.coverageUi ?? coverageUi;
   coverageAbortOnFailure = contrib.coverageAbortOnFailure ?? coverageAbortOnFailure;
   onlyFailures = contrib.onlyFailures ?? onlyFailures;
+  showLogs = contrib.showLogs ?? showLogs;
   coverageShowCode = contrib.coverageShowCode ?? coverageShowCode;
   const coverageDetailComputed: ParsedArgs['coverageDetail'] | undefined =
     contrib.coverageDetail ?? (contrib.selection ? 'auto' : undefined);
@@ -660,6 +680,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
     coverageUi,
     coverageAbortOnFailure,
     onlyFailures,
+    showLogs,
     selectionSpecified: Boolean(contrib.selection),
     selectionPaths: [...(contrib.selectionPaths ?? [])],
     includeGlobs,

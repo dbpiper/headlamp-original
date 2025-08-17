@@ -4,6 +4,7 @@ export type Ctx = {
   readonly cwd: string;
   readonly width: number;
   readonly showStacks: boolean;
+  readonly showLogs: boolean;
   readonly projectHint: RegExp;
   readonly editorCmd: string | undefined;
   readonly readSource: (absPath: string) => readonly string[];
@@ -12,6 +13,7 @@ export type Ctx = {
 export const makeCtx = (
   opts?: { readonly cwd?: string; readonly editorCmd?: string },
   showStacks = false,
+  showLogs = false,
 ): Ctx => {
   const cwd = (opts?.cwd ?? process.cwd()).replace(/\\/g, '/');
   const width = Math.max(
@@ -28,5 +30,13 @@ export const makeCtx = (
       return [];
     }
   };
-  return { cwd, width, showStacks, projectHint, editorCmd: opts?.editorCmd, readSource };
+  return {
+    cwd,
+    width,
+    showStacks,
+    showLogs,
+    projectHint,
+    editorCmd: opts?.editorCmd,
+    readSource,
+  };
 };
