@@ -52,6 +52,31 @@ npx headlamp --coverage
 npx headlamp --coverage src/services/user.ts src/components/UserCard.tsx
 ```
 
+## Bootstrap command
+
+Use `--bootstrapCommand` to run setup work before tests (e.g., database migrations/seeding). If omitted, no bootstrap runs.
+
+- Single token value is treated as an npm script name and run as `npm run -s <name>`.
+- Values containing whitespace are treated as full commands and executed via the system shell.
+
+Examples:
+
+```bash
+# 1) Run an npm script before tests
+npx headlamp --bootstrapCommand test:jest:bootstrap
+
+# 2) Run an npm script with its own args
+npx headlamp --bootstrapCommand "db:migrate -- --reset"
+
+# 3) Run an arbitrary command (e.g., sequelize migrations for test env)
+npx headlamp --bootstrapCommand "sequelize db:migrate --env test"
+
+# 4) Seed a test database via a node script
+npx headlamp --bootstrapCommand "node scripts/seed-test-db.js"
+```
+
+This bootstrap step executes once before Jest is started. If the bootstrap exits non‑zero, the run aborts with an error.
+
 ## Output flags
 
 - `--onlyFailures[=true|false]`:

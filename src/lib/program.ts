@@ -391,13 +391,25 @@ export const emitMergedCoverage = async (
   }
 };
 
-export const runJestBootstrap = async (): Promise<void> => {
-  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const code = await runExitCode(npmCmd, ['run', '-s', 'test:jest:bootstrap'], {
-    env: safeEnv(process.env, {
-      NODE_ENV: 'test',
-    }) as unknown as NodeJS.ProcessEnv,
-  });
+export const runJestBootstrap = async (bootstrap?: string): Promise<void> => {
+  const raw = String(bootstrap ?? '').trim();
+  if (!raw) {
+    return; // no-op when no bootstrap is provided
+  }
+  const env = safeEnv(process.env, { NODE_ENV: 'test' }) as unknown as NodeJS.ProcessEnv;
+  let code = 0;
+  if (/\s/.test(raw)) {
+    // Full command line: run via shell
+    if (process.platform === 'win32') {
+      code = await runExitCode('cmd.exe', ['/d', '/s', '/c', raw], { env });
+    } else {
+      code = await runExitCode('bash', ['-lc', raw], { env });
+    }
+  } else {
+    // Single token: treat as npm script name
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    code = await runExitCode(npmCmd, ['run', '-s', raw], { env });
+  }
   if (Number(code) !== 0) {
     throw new Error('Jest DB bootstrap failed');
   }
@@ -413,6 +425,7 @@ export const program = async (): Promise<void> => {
     coverageAbortOnFailure,
     onlyFailures,
     showLogs,
+    bootstrapCommand,
     selectionSpecified,
     selectionPaths,
     includeGlobs,
@@ -1107,7 +1120,7 @@ export const program = async (): Promise<void> => {
   const executedTestFilesSet = new Set<string>();
   if (shouldRunJest) {
     console.info('Starting Jest (no Vitest targets)…');
-    await runJestBootstrap();
+    await runJestBootstrap(bootstrapCommand);
     const jestRunArgs = selectionIncludesProdPaths ? stripPathTokens(jestArgs) : jestArgs;
     const sanitizedJestRunArgs = jestRunArgs.filter(
       (arg) => !/^--coverageDirectory(?:=|$)/.test(String(arg)),

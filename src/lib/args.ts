@@ -8,6 +8,7 @@ export type Action =
   | { readonly type: 'coverageAbortOnFailure'; readonly value: boolean }
   | { readonly type: 'onlyFailures'; readonly value: boolean }
   | { readonly type: 'showLogs'; readonly value: boolean }
+  | { readonly type: 'bootstrapCommand'; readonly value: string }
   | { readonly type: 'jestArg'; readonly value: string }
   | { readonly type: 'jestArgs'; readonly values: readonly string[] }
   | { readonly type: 'vitestArg'; readonly value: string }
@@ -33,6 +34,7 @@ export const ActionBuilders = {
   coverageAbortOnFailure: (value: boolean): Action => ({ type: 'coverageAbortOnFailure', value }),
   onlyFailures: (value: boolean): Action => ({ type: 'onlyFailures', value }),
   showLogs: (value: boolean): Action => ({ type: 'showLogs', value }),
+  bootstrapCommand: (value: string): Action => ({ type: 'bootstrapCommand', value }),
   jestArg: (value: string): Action => ({ type: 'jestArg', value }),
   jestArgs: (values: readonly string[]): Action => ({ type: 'jestArgs', values }),
   vitestArg: (value: string): Action => ({ type: 'vitestArg', value }),
@@ -118,6 +120,14 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
   };
 
   const rules: readonly Rule[] = [
+    // --bootstrapCommand: command string or npm script name
+    rule.startsWith('--bootstrapCommand=', (value) =>
+      step([ActionBuilders.bootstrapCommand((value.split('=')[1] ?? '').trim())]),
+    ),
+    rule.withLookahead('--bootstrapCommand', (_flag, lookahead) =>
+      step([ActionBuilders.bootstrapCommand(String(lookahead).trim())], true),
+    ),
+
     // --coverage (enable), and --coverage=true/false
     rule.eq('--coverage', () => step([ActionBuilders.coverage(true)])),
     rule.startsWith('--coverage=', (value) =>
@@ -421,6 +431,7 @@ export type ParsedArgs = {
   readonly coverageAbortOnFailure: boolean;
   readonly onlyFailures: boolean;
   readonly showLogs: boolean;
+  readonly bootstrapCommand?: string;
   readonly selectionSpecified: boolean;
   readonly selectionPaths: readonly string[];
   readonly includeGlobs: readonly string[];
@@ -441,6 +452,7 @@ type Contrib = {
   readonly vitest: readonly string[];
   readonly jest: readonly string[];
   readonly coverage: boolean;
+  readonly bootstrapCommand?: string;
   readonly coverageUi?: ParsedArgs['coverageUi'];
   readonly coverageAbortOnFailure?: boolean;
   readonly onlyFailures?: boolean;
@@ -485,6 +497,8 @@ const toContrib = (action: Action): Contrib => {
       return { vitest: [], jest: action.values, coverage: false };
     case 'selectionHint':
       return { vitest: [], jest: [], coverage: false, selection: true };
+    case 'bootstrapCommand':
+      return { vitest: [], jest: [], coverage: false, bootstrapCommand: action.value };
     case 'coverageInclude':
       return { vitest: [], jest: [], coverage: false, include: action.values };
     case 'coverageExclude':
@@ -553,6 +567,9 @@ export const combineContrib = (left: Contrib, right: Contrib): Contrib => {
   }
   return {
     ...next,
+    ...(right.bootstrapCommand !== undefined || left.bootstrapCommand !== undefined
+      ? { bootstrapCommand: right.bootstrapCommand ?? left.bootstrapCommand }
+      : {}),
     ...(right.changed !== undefined || left.changed !== undefined
       ? { changed: right.changed ?? left.changed }
       : {}),
@@ -629,6 +646,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
   onlyFailures = contrib.onlyFailures ?? onlyFailures;
   showLogs = contrib.showLogs ?? showLogs;
   coverageShowCode = contrib.coverageShowCode ?? coverageShowCode;
+  const { bootstrapCommand } = contrib;
   const coverageDetailComputed: ParsedArgs['coverageDetail'] | undefined =
     contrib.coverageDetail ?? (contrib.selection ? 'auto' : undefined);
   coverageMode = contrib.coverageMode ?? (contrib.selection ? 'compact' : 'auto');
@@ -686,6 +704,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
     coverageAbortOnFailure,
     onlyFailures,
     showLogs,
+    ...(bootstrapCommand !== undefined ? { bootstrapCommand } : {}),
     selectionSpecified: Boolean(contrib.selection),
     selectionPaths: [...(contrib.selectionPaths ?? [])],
     includeGlobs,
