@@ -1394,7 +1394,7 @@ export const program = async (): Promise<void> => {
         os.tmpdir(),
         `jest-bridge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
       );
-      const reporterPath = path.resolve('scripts/jest-vitest-bridge.cjs');
+      const reporterPath = path.join(os.tmpdir(), 'headlamp', 'jest-vitest-bridge.cjs');
       try {
         const needsWrite = (() => {
           try {
@@ -1409,7 +1409,7 @@ export const program = async (): Promise<void> => {
           fsSync.writeFileSync(reporterPath, JEST_BRIDGE_REPORTER_SOURCE, 'utf8');
         }
         // ensure environment file exists
-        const envPath = path.resolve('scripts/jest-bridge-env.cjs');
+        const envPath = path.join(os.tmpdir(), 'headlamp', 'jest-bridge-env.cjs');
         try {
           const existingEnv = fsSync.readFileSync(envPath, 'utf8');
           if (existingEnv !== JEST_BRIDGE_ENV_SOURCE) {
