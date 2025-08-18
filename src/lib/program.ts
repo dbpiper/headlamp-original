@@ -672,9 +672,6 @@ export const program = async (): Promise<void> => {
     ? Array.from(new Set([...(selectionPaths as readonly string[]), ...changedSelectionAbs]))
     : selectionPaths;
   const selectionSpecifiedAugmented = Boolean(selectionSpecified || changedSelectionAbs.length > 0);
-  console.info(
-    `Selection → specified=${selectionSpecifiedAugmented} paths=${selectionPathsAugmented.length}`,
-  );
   const { jest } = argsForDiscovery(['run'], jestArgs);
   const selectionLooksLikeTest = selectionPathsAugmented.some(
     (pathText) => /\.(test|spec)\.[tj]sx?$/i.test(pathText) || /(^|\/)tests?\//i.test(pathText),

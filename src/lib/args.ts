@@ -258,9 +258,11 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
     ),
 
     rule.withLookahead('--testPathPattern', (flag, lookahead) =>
-      step([ActionBuilders.jestArgs([flag, lookahead])], true),
+      step([ActionBuilders.jestArgs([flag, lookahead]), ActionBuilders.selectionHint()], true),
     ),
-    rule.startsWith('--testPathPattern=', (value) => step([ActionBuilders.jestArg(value)])),
+    rule.startsWith('--testPathPattern=', (value) =>
+      step([ActionBuilders.jestArg(value), ActionBuilders.selectionHint()]),
+    ),
     rule.inSet(
       (env) => env.jestFlags,
       (value) => step([ActionBuilders.jestArg(value)]),

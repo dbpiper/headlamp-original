@@ -297,9 +297,6 @@ export const decideShouldRunJest = (
     /[\\/]/.test(pathText) || /\.(m?[tj]sx?)$/i.test(pathText);
   const anyTestSelected = (opts.selectionPaths ?? []).some(looksLikeTestPath);
   const anyPathSelected = (opts.selectionPaths ?? []).some(looksLikePath);
-  if (!opts.selectionSpecified) {
-    return { shouldRunJest: false, share, reason: 'broad_run_guard' } as const;
-  }
   if (jestFiles.length === 0) {
     return { shouldRunJest: false, share, reason: 'no_jest_tests' } as const;
   }
