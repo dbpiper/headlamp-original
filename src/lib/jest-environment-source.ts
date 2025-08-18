@@ -19,7 +19,7 @@ module.exports = class BridgeEnv extends NodeEnvironment {
       const dbgPath = process.env.JEST_BRIDGE_DEBUG_PATH;
       this._dbg = (msg) => {
         try {
-          if (process.env.JEST_BRIDGE_DEBUG && dbgPath) fs.appendFileSync(dbgPath, String(msg) + '\n', 'utf8');
+          if (process.env.JEST_BRIDGE_DEBUG && dbgPath) fs.appendFileSync(dbgPath, String(msg) + '\\n', 'utf8');
         } catch {}
       };
     } catch {}
@@ -50,7 +50,7 @@ module.exports = class BridgeEnv extends NodeEnvironment {
         } catch {
           line += JSON.stringify({ type: String(payload && payload.type || 'unknown') });
         }
-        stderr.write(line + '\n');
+        stderr.write(line + '\\n');
       } catch {}
     };
     // Expose to class methods (e.g., handleTestEvent). Also keep a safe fallback.
