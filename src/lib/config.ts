@@ -9,6 +9,7 @@ export type HeadlampConfig = {
   readonly coverageAbortOnFailure?: boolean;
   readonly onlyFailures?: boolean;
   readonly showLogs?: boolean;
+  readonly sequential?: boolean;
   readonly include?: readonly string[];
   readonly exclude?: readonly string[];
   readonly editorCmd?: string;

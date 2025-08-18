@@ -10,6 +10,7 @@ export type Action =
   | { readonly type: 'coverageAbortOnFailure'; readonly value: boolean }
   | { readonly type: 'onlyFailures'; readonly value: boolean }
   | { readonly type: 'showLogs'; readonly value: boolean }
+  | { readonly type: 'sequential'; readonly value: boolean }
   | { readonly type: 'bootstrapCommand'; readonly value: string }
   | { readonly type: 'jestArg'; readonly value: string }
   | { readonly type: 'jestArgs'; readonly values: readonly string[] }
@@ -36,6 +37,7 @@ export const ActionBuilders = {
   coverageAbortOnFailure: (value: boolean): Action => ({ type: 'coverageAbortOnFailure', value }),
   onlyFailures: (value: boolean): Action => ({ type: 'onlyFailures', value }),
   showLogs: (value: boolean): Action => ({ type: 'showLogs', value }),
+  sequential: (value: boolean): Action => ({ type: 'sequential', value }),
   bootstrapCommand: (value: string): Action => ({ type: 'bootstrapCommand', value }),
   jestArg: (value: string): Action => ({ type: 'jestArg', value }),
   jestArgs: (values: readonly string[]): Action => ({ type: 'jestArgs', values }),
@@ -235,6 +237,15 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
     ),
     rule.withLookahead('--onlyFailures', (_flag, lookahead) =>
       step([ActionBuilders.onlyFailures(isTruthy(String(lookahead)))], true),
+    ),
+
+    // --sequential flag (boolean) → serialize projects and map to jest --runInBand
+    rule.eq('--sequential', () => step([ActionBuilders.sequential(true)])),
+    rule.startsWith('--sequential=', (value) =>
+      step([ActionBuilders.sequential(isTruthy((value.split('=')[1] ?? '').trim().toLowerCase()))]),
+    ),
+    rule.withLookahead('--sequential', (_flag, lookahead) =>
+      step([ActionBuilders.sequential(isTruthy(String(lookahead)))], true),
     ),
 
     // --showLogs flag (boolean)
@@ -437,6 +448,7 @@ export type ParsedArgs = {
   readonly coverageAbortOnFailure: boolean;
   readonly onlyFailures: boolean;
   readonly showLogs: boolean;
+  readonly sequential: boolean;
   readonly bootstrapCommand?: string;
   readonly selectionSpecified: boolean;
   readonly selectionPaths: readonly string[];
@@ -463,6 +475,7 @@ type Contrib = {
   readonly coverageAbortOnFailure?: boolean;
   readonly onlyFailures?: boolean;
   readonly showLogs?: boolean;
+  readonly sequential?: boolean;
   readonly selection?: boolean;
   readonly include?: readonly string[];
   readonly exclude?: readonly string[];
@@ -499,6 +512,8 @@ const toContrib = (action: Action): Contrib => {
       return { vitest: [], jest: [], coverage: false, onlyFailures: action.value };
     case 'showLogs':
       return { vitest: [], jest: [], coverage: false, showLogs: action.value };
+    case 'sequential':
+      return { vitest: [], jest: [], coverage: false, sequential: action.value };
     case 'jestArgs':
       return { vitest: [], jest: action.values, coverage: false };
     case 'selectionHint':
@@ -591,6 +606,9 @@ export const combineContrib = (left: Contrib, right: Contrib): Contrib => {
     ...(right.showLogs !== undefined || left.showLogs !== undefined
       ? { showLogs: right.showLogs ?? left.showLogs }
       : {}),
+    ...(right.sequential !== undefined || left.sequential !== undefined
+      ? { sequential: right.sequential ?? left.sequential }
+      : {}),
     ...(right.coverageDetail !== undefined || left.coverageDetail !== undefined
       ? { coverageDetail: right.coverageDetail ?? left.coverageDetail }
       : {}),
@@ -630,6 +648,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
   let coverageAbortOnFailure = false;
   let onlyFailures = false;
   let showLogs = false;
+  let sequential = false;
   let coverageShowCode = Boolean(process.stdout.isTTY);
   let coverageMode: ParsedArgs['coverageMode'] = 'auto';
   const coverageMaxFilesLocalInit: number | undefined = undefined;
@@ -670,6 +689,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
             if (conf.onlyFailures !== undefined)
               (p as any).onlyFailures = Boolean(conf.onlyFailures);
             if (conf.showLogs !== undefined) (p as any).showLogs = Boolean(conf.showLogs);
+            if (conf.sequential !== undefined) (p as any).sequential = Boolean(conf.sequential);
             if (conf.editorCmd) (p as any).editorCmd = String(conf.editorCmd);
             if (conf.workspaceRoot) (p as any).workspaceRoot = String(conf.workspaceRoot);
             if (Array.isArray(conf.include)) (p as any).includeGlobs = conf.include as string[];
@@ -715,6 +735,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
   coverageAbortOnFailure = contrib.coverageAbortOnFailure ?? coverageAbortOnFailure;
   onlyFailures = contrib.onlyFailures ?? onlyFailures;
   showLogs = contrib.showLogs ?? showLogs;
+  sequential = contrib.sequential ?? sequential;
   coverageShowCode = contrib.coverageShowCode ?? coverageShowCode;
   const { bootstrapCommand } = contrib;
   const coverageDetailComputed: ParsedArgs['coverageDetail'] | undefined =
@@ -738,6 +759,11 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
   // Ensure console logs are captured and not suppressed by project config
   if (showLogs) {
     jestArgs.push('--no-silent');
+  }
+
+  // Map sequential → Jest in-band execution
+  if (sequential && !jestArgs.includes('--runInBand')) {
+    jestArgs.push('--runInBand');
   }
 
   const selectionLooksLikeTestPath = (contrib.selectionPaths ?? []).some(
@@ -775,6 +801,7 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
       (configFromFile?.coverageAbortOnFailure as boolean | undefined) ?? coverageAbortOnFailure,
     onlyFailures: (configFromFile?.onlyFailures as boolean | undefined) ?? onlyFailures,
     showLogs: (configFromFile?.showLogs as boolean | undefined) ?? showLogs,
+    sequential: (configFromFile?.sequential as boolean | undefined) ?? sequential,
     ...(bootstrapCommand !== undefined ? { bootstrapCommand } : {}),
     selectionSpecified: Boolean(contrib.selection),
     selectionPaths: [...(contrib.selectionPaths ?? [])],

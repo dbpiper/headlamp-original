@@ -439,6 +439,9 @@ export const program = async (): Promise<void> => {
     if (cfg.bootstrapCommand) {
       pushKV('--bootstrapCommand', cfg.bootstrapCommand);
     }
+    if ((cfg as any).sequential === true) {
+      t.push('--sequential');
+    }
     if (Array.isArray(cfg.jestArgs) && cfg.jestArgs.length) {
       t.push(...cfg.jestArgs);
     }
@@ -540,6 +543,7 @@ export const program = async (): Promise<void> => {
     coverageAbortOnFailure,
     onlyFailures,
     showLogs,
+    sequential,
     bootstrapCommand,
     selectionSpecified,
     selectionPaths,
@@ -1713,8 +1717,9 @@ export const program = async (): Promise<void> => {
         jestExitCode = code;
       }
     };
-    // Run projects concurrently with a fixed stride to avoid shared-counter races
-    await runParallelStride(projectsToRun, 3, async (cfg, index) => {
+    // Run projects concurrently with a fixed stride unless sequential is requested
+    const stride = sequential ? 1 : 3;
+    await runParallelStride(projectsToRun, stride, async (cfg, index) => {
       await runOneProject(cfg as string);
     });
   } else {

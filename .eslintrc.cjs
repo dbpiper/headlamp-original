@@ -54,7 +54,7 @@ const baseRules = {
     },
   ],
   semi: ['error', 'always'],
-  curly: ['error', 'all'],
+  curly: ['warn', 'multi-line'],
   'dot-notation': 'error',
   'no-plusplus': 'off',
   'no-param-reassign': [
