@@ -788,7 +788,10 @@ export const buildConsoleSection = (
       const originFmt = origin ? ` ${ansi.dim(`(${origin})`)}` : '';
       return `      ${ansi.dim('•')} ${typeFmt}${msg}${originFmt}`;
     };
-    const lines = entries.map(toMsg).filter((ln) => stripAnsiSimple(ln).trim().length > 0);
+    const lines = entries
+      .map(toMsg)
+      .filter((ln) => stripAnsiSimple(ln).trim().length > 0)
+      .slice(-150);
     if (lines.length) {
       out.push(ansi.dim('    Logs:'));
       out.push(...lines, '');
@@ -912,6 +915,7 @@ export const buildThrownSection = (details: readonly unknown[]): string[] => {
         candidates.push('cause:');
         candidates.push(...toLines(err.cause));
       }
+      c;
       const rest = { ...err };
       delete (rest as any).name;
       delete (rest as any).message;

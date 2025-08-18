@@ -647,6 +647,11 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
     );
   }
 
+  // Ensure console logs are captured and not suppressed by project config
+  if (showLogs) {
+    jestArgs.push('--no-silent');
+  }
+
   const selectionLooksLikeTestPath = (contrib.selectionPaths ?? []).some(
     (selectionPath) =>
       /\.(test|spec)\.[tj]sx?$/i.test(selectionPath) || /(^|\/)tests?\//i.test(selectionPath),

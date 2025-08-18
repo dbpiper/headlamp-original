@@ -82,11 +82,20 @@ const stripBridgeEventsFromConsole = (maybeConsole: unknown): unknown => {
 
 export const parseBridgeConsole = (
   consoleEntries: unknown,
-): { readonly http: readonly HttpEvent[]; readonly assertions: readonly AssertionEvt[] } => {
+): {
+  readonly http: readonly HttpEvent[];
+  readonly assertions: readonly AssertionEvt[];
+  readonly consoleList: ReadonlyArray<{
+    readonly type?: string;
+    readonly message?: string;
+    readonly origin?: string;
+  }>;
+} => {
   const http: HttpEvent[] = [];
   const assertions: AssertionEvt[] = [];
+  const consoleList: Array<{ type?: string; message?: string; origin?: string }> = [];
   if (!Array.isArray(consoleEntries)) {
-    return { http, assertions };
+    return { http, assertions, consoleList };
   }
 
   for (const entry of consoleEntries) {
@@ -96,6 +105,14 @@ export const parseBridgeConsole = (
       ? (rawMsgVal as unknown[]).map(String).join(' ')
       : String(rawMsgVal ?? '');
     if (!raw.includes('[JEST-BRIDGE-EVENT]')) {
+      // Preserve non-bridge console entries
+      consoleList.push({
+        type: String((rec?.type as string | undefined) || ''),
+        message: Array.isArray(rawMsgVal)
+          ? (rawMsgVal as unknown[]).map(String).join(' ')
+          : String(rawMsgVal ?? ''),
+        origin: String((rec?.origin as string | undefined) || ''),
+      });
       // eslint-disable-next-line no-continue
       continue;
     }
@@ -182,12 +199,27 @@ export const parseBridgeConsole = (
               ? ((evt as any).actualPreview as string)
               : undefined,
         });
+      } else if (type === 'console') {
+        consoleList.push({
+          type: String(((evt as any).level as string | undefined) || ''),
+          message: String(((evt as any).message as string | undefined) || ''),
+        });
+      } else if (type === 'consoleBatch') {
+        try {
+          const arr = Array.isArray((evt as any).entries) ? ((evt as any).entries as any[]) : [];
+          for (const e of arr) {
+            consoleList.push({
+              type: String(((e as any)?.type as string | undefined) || ''),
+              message: String(((e as any)?.message as string | undefined) || ''),
+            });
+          }
+        } catch {}
       }
     } catch {
       /* ignore malformed */
     }
   }
-  return { http, assertions };
+  return { http, assertions, consoleList };
 };
 
 export const renderRunHeader = ({ ctx, onlyFailures }: RenderEnv): Lines =>
@@ -773,16 +805,21 @@ export const renderFailedAssertion = (args: {
 export const renderFileBlock = (file: BridgeJSON['testResults'][number], env: RenderEnv): Lines => {
   const rel = file.testFilePath.replace(/\\/g, '/').replace(`${env.ctx.cwd}/`, '');
   const failed = file.testResults.filter((assertion) => assertion.status === 'failed');
-  const { http, assertions } = parseBridgeConsole(file.console);
+  // Treat suite-level failures (failureMessage/testExecError or explicit status) as a failed file
+  const hasSuiteFailure =
+    Boolean(file.failureMessage || (file as any).testExecError) || file.status === 'failed';
+  const failedCountForBadge = hasSuiteFailure ? Math.max(1, failed.length) : failed.length;
+  const { http, assertions, consoleList } = parseBridgeConsole(file.console);
   const httpSorted = [...http].sort(by<HttpEvent>((event) => event.timestampMs));
 
+  const mf = { ...file, console: consoleList } as any;
   return concat(
     renderPerFileOverviewBlock(rel, file.testResults, env.onlyFailures),
-    renderFileBadge(rel, failed.length, env.onlyFailures),
-    renderFileLevelFailure(file, env.ctx),
+    renderFileBadge(rel, failedCountForBadge, env.onlyFailures),
+    renderFileLevelFailure(mf, env.ctx),
     ...failed.map((assertion) =>
       renderFailedAssertion({
-        file,
+        file: mf,
         relPath: rel,
         assertion,
         ctx: env.ctx,

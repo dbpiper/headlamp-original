@@ -1201,40 +1201,54 @@ export const program = async (): Promise<void> => {
       }
 
       // eslint-disable-next-line no-await-in-loop
-      const { code, output } = await runWithCapture(
-        babelNodeBin,
-        [
-          '--extensions',
-          '.js,.ts',
-          jestBin,
-          '--config',
-          cfg,
-          '--testLocationInResults',
-          '--runTestsByPath',
-          `--reporters=${reporterPath}`,
-          '--colors',
-          '--env',
-          path.resolve('scripts/jest-bridge-env.cjs'),
-          ...sanitizedJestRunArgs,
-          ...(collectCoverage
-            ? [
-                '--coverageDirectory',
-                path.join('coverage', 'jest', path.basename(cfg).replace(/[^a-zA-Z0-9_.-]+/g, '_')),
-              ]
-            : []),
-          ...coverageFromArgs,
-          '--passWithNoTests',
-          ...files,
-        ],
-        {
-          env: safeEnv(process.env, {
-            NODE_ENV: 'test',
-            JEST_BRIDGE_OUT: outJson,
-            FORCE_COLOR: '3',
-            TERM: process.env.TERM || 'xterm-256color',
-          }) as unknown as NodeJS.ProcessEnv,
-        },
-      );
+      const fullArgs = [
+        '--extensions',
+        '.js,.ts',
+        jestBin,
+        '--config',
+        cfg,
+        '--testLocationInResults',
+        '--runTestsByPath',
+        `--reporters=${reporterPath}`,
+        '--colors',
+        ...sanitizedJestRunArgs,
+        ...(collectCoverage
+          ? [
+              '--coverageDirectory',
+              path.join('coverage', 'jest', path.basename(cfg).replace(/[^a-zA-Z0-9_.-]+/g, '_')),
+            ]
+          : []),
+        ...coverageFromArgs,
+        // // Force our environment last so user flags/config cannot override it
+        // '--testEnvironment',
+        // path.resolve('scripts/jest-bridge-env.cjs'),
+        // // Back-compat for older Jest versions which use --env
+        // '--env',
+        // path.resolve('scripts/jest-bridge-env.cjs'),
+        ...(showLogs ? ['--no-silent'] : []),
+        '--passWithNoTests',
+        '--verbose',
+        ...files,
+      ];
+      if (isDebug() || showLogs) {
+        const hasSilentFalse = fullArgs.includes('--silent=false');
+        const hasEnv = fullArgs.includes('--testEnvironment');
+        console.info(
+          `debug: showLogs=${String(showLogs)} hasSilentFalse=${String(hasSilentFalse)} hasTestEnvironment=${String(hasEnv)}`,
+        );
+      }
+      const { code, output } = await runWithCapture(babelNodeBin, fullArgs, {
+        env: safeEnv(process.env, {
+          NODE_ENV: 'test',
+          JEST_BRIDGE_OUT: outJson,
+          JEST_BRIDGE_DEBUG: showLogs ? '1' : undefined,
+          JEST_BRIDGE_DEBUG_PATH: showLogs
+            ? path.resolve(os.tmpdir(), `jest-bridge-debug-${Date.now()}.log`)
+            : undefined,
+          FORCE_COLOR: '3',
+          TERM: process.env.TERM || 'xterm-256color',
+        }) as unknown as NodeJS.ProcessEnv,
+      });
       let pretty = '';
       try {
         const debug = isDebug();
@@ -1246,7 +1260,103 @@ export const program = async (): Promise<void> => {
         }
         const jsonText = fsSync.readFileSync(outJson, 'utf8');
         const parsed = JSON.parse(jsonText) as unknown;
-        const bridge = coerceJestJsonToBridge(parsed);
+        const bridgeBase = coerceJestJsonToBridge(parsed);
+        // Parse bridge events and summarize for debugging
+        const consoleByFile = (() => {
+          const by = new Map<string, Array<{ type?: string; message?: string; origin?: string }>>();
+          try {
+            const lines = output.split(/\r?\n/);
+            let totalEvents = 0;
+            let envReadyCount = 0;
+            let consoleCount = 0;
+            let consoleBatchCount = 0;
+            let httpCount = 0;
+            let assertionCount = 0;
+            for (const line of lines) {
+              const idx = line.indexOf('[JEST-BRIDGE-EVENT]');
+              if (idx < 0) {
+                continue;
+              } // eslint-disable-line no-continue
+              const payload = line.slice(idx + '[JEST-BRIDGE-EVENT]'.length).trim();
+              if (!payload) {
+                continue;
+              } // eslint-disable-line no-continue
+              let obj: any;
+              try {
+                obj = JSON.parse(payload);
+              } catch {
+                obj = null;
+              }
+              if (!obj || !obj.type) {
+                continue;
+              } // eslint-disable-line no-continue
+              const testPath =
+                typeof obj.testPath === 'string' ? obj.testPath.replace(/\\/g, '/') : undefined;
+              totalEvents += 1;
+              if (obj.type === 'envReady') envReadyCount += 1;
+              if (obj.type === 'console') consoleCount += 1;
+              if (obj.type === 'consoleBatch') consoleBatchCount += 1;
+              if (
+                obj.type === 'httpResponse' ||
+                obj.type === 'httpAbort' ||
+                obj.type === 'httpResponseBatch'
+              )
+                httpCount += 1;
+              if (obj.type === 'assertionFailure') assertionCount += 1;
+              if (!testPath) {
+                continue;
+              } // eslint-disable-line no-continue
+              if (obj.type === 'console') {
+                const arr = by.get(testPath) || [];
+                arr.push({ type: obj.level || 'log', message: obj.message || '' });
+                by.set(testPath, arr);
+              } else if (obj.type === 'consoleBatch' && Array.isArray(obj.entries)) {
+                const arr = by.get(testPath) || [];
+                for (const e of obj.entries) {
+                  arr.push({ type: (e && e.type) || 'log', message: (e && e.message) || '' });
+                }
+                by.set(testPath, arr);
+              }
+            }
+            if (isDebug() || showLogs) {
+              console.info(
+                `debug: bridge events total=${totalEvents} envReady=${envReadyCount} console=${consoleCount} consoleBatch=${consoleBatchCount} http=${httpCount} assertion=${assertionCount}`,
+              );
+              // process.exit(1);
+            }
+          } catch {}
+          return by;
+        })();
+        const bridge = (() => {
+          if (consoleByFile.size === 0) {
+            return bridgeBase;
+          }
+          const files = bridgeBase.testResults.map((file) => {
+            const key = String(file.testFilePath || '').replace(/\\/g, '/');
+            const extra = consoleByFile.get(key) || [];
+            if (!extra.length) {
+              return file;
+            }
+            const mergedConsole = [
+              ...((file as any).console || []),
+              ...extra.map((c) => ({ message: c.message, type: c.type, origin: c.origin })),
+            ];
+            return { ...(file as any), console: mergedConsole } as typeof file;
+          });
+          if (isDebug() || showLogs) {
+            const sample = files
+              .map((f) => ({
+                file: String((f as any).testFilePath || '')
+                  .split('/')
+                  .slice(-2)
+                  .join('/'),
+                consoleCount: Array.isArray((f as any).console) ? (f as any).console.length : 0,
+              }))
+              .slice(0, 5);
+            console.info(`debug: per-file console counts (first 5): ${JSON.stringify(sample)}`);
+          }
+          return { ...bridgeBase, testResults: files } as typeof bridgeBase;
+        })();
         allBridgeJson.push(bridge);
         // Reorder per-file results by directness and failure before rendering
         try {
@@ -1289,6 +1399,7 @@ export const program = async (): Promise<void> => {
           cwd: repoRootForDiscovery,
           ...(editorCmd !== undefined ? { editorCmd } : {}),
           onlyFailures,
+          showLogs,
         });
         if (debug) {
           const preview = pretty.split('\n').slice(0, 3).join('\n');
@@ -1306,6 +1417,7 @@ export const program = async (): Promise<void> => {
             cwd: repoRootForDiscovery,
             ...(editorCmd !== undefined ? { editorCmd } : {}),
             onlyFailures,
+            showLogs,
           });
           const merged = `${stripFooter(pretty)}\n${stripFooter(rawAlso)}`.trimEnd();
           pretty = merged;
