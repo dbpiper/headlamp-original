@@ -843,6 +843,9 @@ const vitestFooter = (agg: BridgeJSON['aggregated'], durationMs?: number): strin
     agg.numPassedTests ? colorTokens.pass(`${agg.numPassedTests} passed`) : '',
     agg.numPendingTests ? colorTokens.skip(`${agg.numPendingTests} skipped`) : '',
     agg.numTodoTests ? colorTokens.todo(`${agg.numTodoTests} todo`) : '',
+    typeof agg.numTimedOutTests === 'number' && agg.numTimedOutTests > 0
+      ? colorTokens.fail(`${agg.numTimedOutTests} timed out`)
+      : '',
   ]
     .filter(Boolean)
     .join(ansi.dim(' | '));
@@ -862,11 +865,49 @@ const vitestFooter = (agg: BridgeJSON['aggregated'], durationMs?: number): strin
 
 export const renderFooter = (data: BridgeJSON): Lines => {
   const failedCount = data.aggregated.numFailedTests;
+  const timedOutCount = Number(data.aggregated.numTimedOutTests || 0);
   return [
     drawRule(BackgroundColors.Failure(ansi.white(` Failed Tests ${failedCount} `))),
     '',
     vitestFooter(data.aggregated),
+    ...(timedOutCount > 0
+      ? ['', drawRule(BackgroundColors.Failure(ansi.white(` Timed Out ${timedOutCount} `)))]
+      : []),
   ];
+};
+
+const isTimedOutFile = (file: BridgeJSON['testResults'][number]): boolean => {
+  const inMsg = (text?: string) => /timed out/i.test(String(text || ''));
+  const execMsg = (() => {
+    try {
+      const anyErr = (file as any).testExecError;
+      return anyErr && typeof anyErr.message === 'string' ? anyErr.message : String(anyErr || '');
+    } catch {
+      return '';
+    }
+  })();
+  const assertionTimeout = (file.testResults || []).some((a) => Boolean((a as any).timedOut));
+  return Boolean(
+    (file as any).timedOut || inMsg(file.failureMessage) || inMsg(execMsg) || assertionTimeout,
+  );
+};
+
+export const renderTimedOutSection = (data: BridgeJSON, ctx: Ctx): Lines => {
+  const timedOutFiles = data.testResults.filter(isTimedOutFile);
+  if (timedOutFiles.length === 0) {
+    return empty;
+  }
+  const header = drawRule(
+    BackgroundColors.Failure(ansi.white(` Timed Out Tests ${timedOutFiles.length} `)),
+  );
+  const lines: string[] = [];
+  for (const file of timedOutFiles) {
+    const rel = file.testFilePath.replace(/\\/g, '/').replace(`${ctx.cwd}/`, '');
+    const count = (file.testResults || []).filter((a) => Boolean((a as any).timedOut)).length;
+    const suffix = count > 0 ? ansi.dim(` (${count} tests)`) : '';
+    lines.push(`${Colors.Failure('⏳')} ${ansi.white(rel)}${suffix}`);
+  }
+  return [''].concat(header, '', lines, ['']);
 };
 
 export const renderVitestFromJestJSON = (
@@ -880,6 +921,7 @@ export const renderVitestFromJestJSON = (
       ...data.testResults.map((file) =>
         renderFileBlock(file, { ctx, onlyFailures: Boolean(opts?.onlyFailures) }),
       ),
+      renderTimedOutSection(data, ctx),
       renderFooter(data),
     ),
     joinLines,

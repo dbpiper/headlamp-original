@@ -38,6 +38,140 @@ und hotspots
 
 Pass all your regular Jest flags (e.g. `-t`, `--testNamePattern`, paths). Headlamp strips/adjusts coverage-related flags when listing tests.
 
+## Configuration
+
+Headlamp supports a project-level config file. The config is explicit and contextual:
+
+- Base defaults: always applied (safe, non-surprising)
+- Coverage-context defaults: only applied if coverage is active (i.e., you passed `--coverage` or you set `coverage: true` in config)
+- Changed-context defaults: only applied if changed selection is active (i.e., you passed `--changed=…` or set a default mode in config)
+
+CLI always overrides config. No environment variables or hidden presets are used.
+
+### Supported filenames (repo root)
+
+- `headlamp.config.ts`
+- `headlamp.config.js` / `headlamp.config.mjs` / `headlamp.config.cjs`
+- `headlamp.config.json` / `headlamp.config.yaml` / `headlamp.config.yml`
+
+### Base defaults (always applied)
+
+These are applied to every run and should be non-controversial project choices:
+
+- `bootstrapCommand: string` – command or npm script to run before tests
+- `jestArgs: string[]` – extra args passed to Jest (e.g., `['--runInBand']`)
+
+Example:
+
+```ts
+// headlamp.config.ts
+export default {
+  bootstrapCommand: 'test:jest:bootstrap',
+  jestArgs: ['--runInBand'],
+};
+```
+
+### Coverage-context defaults
+
+Applied only when coverage is active (triggered by `--coverage` on the CLI or `coverage: true` in config). Prefer the nested `coverage` section:
+
+```ts
+export default {
+  coverage: {
+    abortOnFailure: true, // -> --coverage.abortOnFailure
+    mode: 'auto', // -> --coverage.mode=auto
+    pageFit: true, // -> --coverage.pageFit=true
+  },
+};
+```
+
+Optional extras (honored when coverage is active):
+
+- `editorCmd` -> `--coverage.editor`
+- `include: string[]` -> `--coverage.include=a,b,c`
+- `exclude: string[]` -> `--coverage.exclude=a,b,c`
+- `coverageDetail: number | 'all' | 'auto'` -> `--coverage.detail`
+- `coverageShowCode: boolean` -> `--coverage.showCode`
+- `coverageMaxFiles: number` -> `--coverage.maxFiles`
+- `coverageMaxHotspots: number` -> `--coverage.maxHotspots`
+
+Back-compat: legacy top-level fields (`coverageAbortOnFailure`, `coverageMode`, `coveragePageFit`, etc.) are still recognized, but the nested `coverage` section is preferred.
+
+### Changed-context defaults
+
+Applied only when changed selection is active (triggered by `--changed=…` on the CLI, or by specifying a default mode in config). Prefer the nested `changed` section:
+
+```ts
+export default {
+  changed: {
+    depth: 20, // default depth for all modes -> --changed.depth=20
+    branch: {
+      depth: 10, // per-mode override when --changed=branch
+    },
+    staged: {
+      depth: 8,
+    },
+    unstaged: {
+      depth: 6,
+    },
+    all: {
+      depth: 12,
+    },
+  },
+};
+```
+
+If you also want to enforce a default mode for everyone, you can set a string at the legacy top-level: `changed: 'branch'`. Headlamp will emit `--changed=branch` unless the CLI already specified a mode. Otherwise, prefer to let scripts opt-in on the CLI and keep config focused on depth/details.
+
+### Precedence and gating rules
+
+- CLI always wins. If you pass `--coverage.mode=full`, it overrides the config’s `coverage.mode`.
+- Coverage extras only apply when coverage is active.
+- Changed depth only applies when changed selection is active. If a per‑mode depth exists, it’s used; otherwise we fall back to the default `changed.depth`.
+
+### Example configs and scripts
+
+Config (headlamp.config.ts):
+
+```ts
+export default {
+  // Base
+  bootstrapCommand: 'test:jest:bootstrap',
+  jestArgs: ['--runInBand'],
+
+  // Coverage-context
+  coverage: {
+    abortOnFailure: true,
+    mode: 'auto',
+    pageFit: true,
+  },
+
+  // Changed-context
+  changed: {
+    depth: 20,
+    branch: { depth: 10 },
+  },
+};
+```
+
+Scripts:
+
+```json
+{
+  "scripts": {
+    "test": "headlamp --runInBand",
+    "test:coverage": "headlamp --coverage --runInBand",
+    "test:dev": "npm run test -- --changed=branch --coverage --onlyFailures"
+  }
+}
+```
+
+Resulting behavior:
+
+- `headlamp --runInBand`: base defaults only; no coverage/changed extras.
+- `headlamp --coverage --runInBand`: applies coverage abortOnFailure/mode/pageFit; changed depth is not applied.
+- `headlamp --changed=branch --coverage --onlyFailures`: applies per‑mode changed depth (10) and coverage group; `onlyFailures` is opt‑in via CLI.
+
 ## Examples
 
 - Show coverage with detailed hotspots, auto-fit to terminal rows:
@@ -121,6 +255,7 @@ npx headlamp --onlyFailures --showLogs
       - files changed on the current branch relative to the default branch (via merge-base), and
       - your current uncommitted changes (staged, unstaged tracked, and untracked files).
       - Default branch is resolved via `origin/HEAD` when available, falling back to `origin/main` or `origin/master`.
+    - `lastCommit`: files changed in the last commit (`git diff --name-only HEAD^ HEAD`). Useful on main to scope to the most recent change.
   - Effects:
     - Uses changed production files as seeds to discover related tests by import-graph.
     - Coverage tables prioritize and annotate files related to selection/changed files.

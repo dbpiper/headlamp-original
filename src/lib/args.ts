@@ -1,6 +1,8 @@
 import * as path from 'node:path';
 
-export type ChangedMode = 'all' | 'staged' | 'unstaged' | 'branch';
+import { loadHeadlampConfig } from './config';
+
+export type ChangedMode = 'all' | 'staged' | 'unstaged' | 'branch' | 'lastCommit';
 
 export type Action =
   | { readonly type: 'coverage'; readonly coverageValue: boolean }
@@ -112,7 +114,7 @@ export const isTruthy = (value: string): boolean =>
   value === STRING_TRUE || value === STRING_ONE || value === STRING_EMPTY;
 
 export const parseActionsFromTokens = (tokens: readonly string[]): readonly Action[] => {
-  const jestOnlyFlags = new Set(['--ci', '--detectOpenHandles', '--forceExit', '--runInBand']);
+  const jestOnlyFlags = new Set();
 
   const parseCoverageUiString = (raw: string): 'jest' | 'both' => {
     const normalized = String(raw).toLowerCase();
@@ -323,7 +325,9 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
             ? 'unstaged'
             : raw === 'branch'
               ? 'branch'
-              : 'all';
+              : raw === 'lastcommit'
+                ? 'lastCommit'
+                : 'all';
       return step([ActionBuilders.changed(mode)]);
     }),
     rule.withLookahead('--changed', (_flag, lookahead) => {
@@ -335,7 +339,9 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
             ? 'unstaged'
             : raw === 'branch'
               ? 'branch'
-              : 'all';
+              : raw === 'lastcommit'
+                ? 'lastCommit'
+                : 'all';
       return step([ActionBuilders.changed(mode)], true);
     }),
 
@@ -618,7 +624,7 @@ export const DEFAULT_EXCLUDE = [
 
 export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
   const vitestArgs: string[] = ['run'];
-  const jestArgs: string[] = ['--detectOpenHandles', '--forceExit', '--runInBand'];
+  const jestArgs: string[] = [];
   let collectCoverage = false;
   let coverageUi: ParsedArgs['coverageUi'] = 'both';
   let coverageAbortOnFailure = false;
@@ -637,7 +643,71 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
     coverageUi = uiEnv as ParsedArgs['coverageUi'];
   }
 
+  const configFromFile: ParsedArgs | undefined = (() => {
+    // Synchronously bridge async config load by snapshotting into a local variable via deopt
+    // The program entrypoint will call deriveArgs early, so we keep this minimal
+    let cfg: ParsedArgs | undefined;
+    try {
+      // eslint-disable-next-line no-new-func
+      const run = new Function(
+        'loadHeadlampConfig',
+        'return (async () => (await loadHeadlampConfig()))()',
+      );
+      const maybe = run(loadHeadlampConfig) as unknown as Promise<any>;
+      // This is a best-effort; if it throws or is unresolved, we ignore
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      maybe.then((loaded) => {
+        try {
+          if (loaded && typeof loaded === 'object') {
+            const conf = loaded as any;
+            const p: Partial<ParsedArgs> = {};
+            if (Array.isArray(conf.vitestArgs)) (p as any).vitestArgs = conf.vitestArgs;
+            if (Array.isArray(conf.jestArgs)) (p as any).jestArgs = conf.jestArgs;
+            if (conf.coverage !== undefined) (p as any).collectCoverage = Boolean(conf.coverage);
+            if (conf.coverageUi) (p as any).coverageUi = conf.coverageUi;
+            if (conf.coverageAbortOnFailure !== undefined)
+              (p as any).coverageAbortOnFailure = Boolean(conf.coverageAbortOnFailure);
+            if (conf.onlyFailures !== undefined)
+              (p as any).onlyFailures = Boolean(conf.onlyFailures);
+            if (conf.showLogs !== undefined) (p as any).showLogs = Boolean(conf.showLogs);
+            if (conf.editorCmd) (p as any).editorCmd = String(conf.editorCmd);
+            if (conf.workspaceRoot) (p as any).workspaceRoot = String(conf.workspaceRoot);
+            if (Array.isArray(conf.include)) (p as any).includeGlobs = conf.include as string[];
+            if (Array.isArray(conf.exclude)) (p as any).excludeGlobs = conf.exclude as string[];
+            if (conf.coverageDetail !== undefined) (p as any).coverageDetail = conf.coverageDetail;
+            if (conf.coverageShowCode !== undefined)
+              (p as any).coverageShowCode = Boolean(conf.coverageShowCode);
+            if (conf.coverageMode) (p as any).coverageMode = conf.coverageMode;
+            if (conf.coverageMaxFiles !== undefined)
+              (p as any).coverageMaxFiles = Number(conf.coverageMaxFiles);
+            if (conf.coverageMaxHotspots !== undefined)
+              (p as any).coverageMaxHotspots = Number(conf.coverageMaxHotspots);
+            if (conf.coveragePageFit !== undefined)
+              (p as any).coveragePageFit = Boolean(conf.coveragePageFit);
+            if (conf.changed) (p as any).changed = conf.changed;
+            cfg = p as ParsedArgs;
+          }
+        } catch {
+          /* ignore bad config */
+        }
+      });
+    } catch {
+      /* ignore c12 load sync bridge */
+    }
+    return cfg;
+  })();
+
   const contrib = parseActionsFromTokens(argv).map(toContrib).reduce(combineContrib, emptyContrib);
+  vitestArgs.push(
+    ...(Array.isArray((configFromFile as any)?.vitestArgs)
+      ? ((configFromFile as any).vitestArgs as string[])
+      : []),
+  );
+  jestArgs.push(
+    ...(Array.isArray((configFromFile as any)?.jestArgs)
+      ? ((configFromFile as any).jestArgs as string[])
+      : []),
+  );
   vitestArgs.push(...contrib.vitest);
   jestArgs.push(...contrib.jest);
   collectCoverage ||= contrib.coverage;
@@ -685,31 +755,32 @@ export const deriveArgs = (argv: readonly string[]): ParsedArgs => {
     })
     .filter((glob, index, arr) => arr.indexOf(glob) === index);
 
-  const includeGlobs = (contrib.include ?? []).length
-    ? (contrib.include as string[])
+  const includeGlobs = (configFromFile?.includeGlobs ?? contrib.include ?? []).length
+    ? ((configFromFile?.includeGlobs as string[]) ?? (contrib.include as string[]))
     : selectionLooksLikeTestPath
       ? [...DEFAULT_INCLUDE]
       : inferredFromSelection.length
         ? inferredFromSelection
         : [...DEFAULT_INCLUDE];
-  const excludeGlobs = (contrib.exclude ?? []).length
-    ? (contrib.exclude as string[])
+  const excludeGlobs = (configFromFile?.excludeGlobs ?? contrib.exclude ?? []).length
+    ? ((configFromFile?.excludeGlobs as string[]) ?? (contrib.exclude as string[]))
     : [...DEFAULT_EXCLUDE];
 
   const out: ParsedArgs = {
-    vitestArgs,
-    jestArgs,
-    collectCoverage,
-    coverageUi,
-    coverageAbortOnFailure,
-    onlyFailures,
-    showLogs,
+    vitestArgs: (configFromFile?.vitestArgs as string[] | undefined) ?? vitestArgs,
+    jestArgs: (configFromFile?.jestArgs as string[] | undefined) ?? jestArgs,
+    collectCoverage: (configFromFile?.collectCoverage as boolean | undefined) ?? collectCoverage,
+    coverageUi: (configFromFile?.coverageUi as any) ?? coverageUi,
+    coverageAbortOnFailure:
+      (configFromFile?.coverageAbortOnFailure as boolean | undefined) ?? coverageAbortOnFailure,
+    onlyFailures: (configFromFile?.onlyFailures as boolean | undefined) ?? onlyFailures,
+    showLogs: (configFromFile?.showLogs as boolean | undefined) ?? showLogs,
     ...(bootstrapCommand !== undefined ? { bootstrapCommand } : {}),
     selectionSpecified: Boolean(contrib.selection),
     selectionPaths: [...(contrib.selectionPaths ?? [])],
     includeGlobs,
     excludeGlobs,
-    coverageShowCode,
+    coverageShowCode: (configFromFile?.coverageShowCode as boolean | undefined) ?? coverageShowCode,
     ...(coverageDetailComputed !== undefined ? { coverageDetail: coverageDetailComputed } : {}),
     coverageMode,
     ...(coverageMaxFilesLocal !== undefined ? { coverageMaxFiles: coverageMaxFilesLocal } : {}),

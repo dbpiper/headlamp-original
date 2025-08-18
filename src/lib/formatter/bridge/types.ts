@@ -3,6 +3,7 @@ export type BridgeJSON = {
   readonly testResults: ReadonlyArray<{
     readonly testFilePath: string;
     readonly status: 'passed' | 'failed';
+    readonly timedOut?: boolean;
     readonly failureMessage: string;
     readonly failureDetails?: readonly unknown[];
     readonly testExecError?: unknown | null;
@@ -11,6 +12,7 @@ export type BridgeJSON = {
       readonly title: string;
       readonly fullName: string;
       readonly status: string;
+      readonly timedOut?: boolean;
       readonly duration: number;
       readonly location: { readonly line: number; readonly column: number } | null;
       readonly failureMessages: string[];
@@ -26,6 +28,8 @@ export type BridgeJSON = {
     readonly numFailedTests: number;
     readonly numPendingTests: number;
     readonly numTodoTests: number;
+    readonly numTimedOutTests?: number;
+    readonly numTimedOutTestSuites?: number;
     readonly startTime: number;
     readonly success: boolean;
     readonly runTimeMs?: number;

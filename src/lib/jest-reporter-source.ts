@@ -70,6 +70,7 @@ class BridgeReporter {
       title: a.title,
       fullName: a.fullName || [...(a.ancestorTitles || []), a.title].join(' '),
       status: a.status,
+      timedOut: Boolean(a.status === 'failed' && String(a.failureMessages || '').toLowerCase().includes('timed out')),
       duration: a.duration || 0,
       location: a.location || null,
       failureMessages: (a.failureMessages || []).map(String),
@@ -78,6 +79,7 @@ class BridgeReporter {
     this.buf.testResults.push({
       testFilePath: tr.testFilePath,
       status: tr.numFailingTests ? 'failed' : 'passed',
+      timedOut: Boolean((tr.testExecError && /timed out/i.test(String(tr.testExecError && (tr.testExecError.message || tr.testExecError)))) || /timed out/i.test(String(tr.failureMessage || ''))),
       failureMessage: tr.failureMessage || '',
       failureDetails: (tr.failureDetails || []).map(sanitizeDetail),
       testExecError: tr.testExecError ? sanitizeError(tr.testExecError) : null,
@@ -87,6 +89,10 @@ class BridgeReporter {
     });
   }
   onRunComplete(_contexts, agg) {
+    // Compute timed out counts heuristically from test results & errors
+    const suiteTimedOut = (r) => Boolean((r.testExecError && /timed out/i.test(String(r.testExecError && (r.testExecError.message || r.testExecError)))) || /timed out/i.test(String(r.failureMessage || '')));
+    const fileTimeouts = this.buf.testResults.filter(suiteTimedOut);
+    const testTimeouts = this.buf.testResults.flatMap((r) => (r.testResults || [])).filter((a) => a && a.timedOut);
     this.buf.aggregated = {
       numTotalTestSuites: agg.numTotalTestSuites,
       numPassedTestSuites: agg.numPassedTestSuites,
@@ -96,6 +102,8 @@ class BridgeReporter {
       numFailedTests: agg.numFailedTests,
       numPendingTests: agg.numPendingTests,
       numTodoTests: agg.numTodoTests,
+      numTimedOutTests: testTimeouts.length,
+      numTimedOutTestSuites: fileTimeouts.length,
       startTime: agg.startTime,
       success: agg.success,
       runTimeMs: agg.testResults.reduce((t, r) => t + Math.max(0, (r.perfStats?.end || 0) - (r.perfStats?.start || 0)), 0),

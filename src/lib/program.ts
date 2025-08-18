@@ -18,6 +18,7 @@ import {
   discoverJestResilient,
   filterCandidatesForProject,
   decideShouldRunJest,
+  discoverJestCached,
 } from './discovery';
 import { readCoverageJson, filterCoverageMap } from './coverage-core';
 import {
@@ -38,9 +39,10 @@ import { stripAnsiSimple } from './stacks';
 import { tintPct } from './bars';
 import { selectDirectTestsForProduction } from './graph-distance';
 import { computeDirectnessRank, sortTestResultsWithRank } from './relevance';
+import { runParallelStride } from './parallel';
+import { loadHeadlampConfig, type HeadlampConfig } from './config';
 
 const jestBin = './node_modules/.bin/jest';
-const babelNodeBin = './node_modules/.bin/babel-node';
 
 export const registerSignalHandlersOnce = () => {
   let handled = false;
@@ -418,6 +420,119 @@ export const runJestBootstrap = async (bootstrap?: string): Promise<void> => {
 export const program = async (): Promise<void> => {
   registerSignalHandlersOnce();
   const argv = process.argv.slice(2);
+  const fileConfig = await loadHeadlampConfig();
+  const cfgTokens = ((): string[] => {
+    const t: string[] = [];
+    const pushIf = (cond: boolean, token: string) => {
+      if (cond) {
+        t.push(token);
+      }
+    };
+    const pushKV = (flag: string, value: string | number) => {
+      t.push(`${flag}=${String(value)}`);
+    };
+    const cfg = fileConfig as HeadlampConfig;
+    if (!cfg || typeof cfg !== 'object') {
+      return t;
+    }
+    // 1) Base defaults (always-on)
+    if (cfg.bootstrapCommand) {
+      pushKV('--bootstrapCommand', cfg.bootstrapCommand);
+    }
+    if (Array.isArray(cfg.jestArgs) && cfg.jestArgs.length) {
+      t.push(...cfg.jestArgs);
+    }
+    // 2) Coverage-context defaults (apply only when coverage is active)
+    const argvHasCoverage = argv.some(
+      (tok) => tok === '--coverage' || String(tok).startsWith('--coverage='),
+    );
+    const coverageAlwaysOn = Boolean((cfg as any).coverage === true);
+    const coverageObj =
+      (cfg as any).coverage && typeof (cfg as any).coverage === 'object'
+        ? ((cfg as any).coverage as Record<string, unknown>)
+        : undefined;
+    if (coverageAlwaysOn && !argvHasCoverage) {
+      t.push('--coverage');
+    }
+    if (coverageAlwaysOn || argvHasCoverage) {
+      const abortOnFailure = coverageObj?.abortOnFailure as boolean | undefined;
+      const mode = (coverageObj?.mode as string | undefined) ?? (cfg as any).coverageMode;
+      const pageFit = (coverageObj?.pageFit as boolean | undefined) ?? (cfg as any).coveragePageFit;
+      if (abortOnFailure !== undefined) {
+        pushKV('--coverage.abortOnFailure', abortOnFailure ? 'true' : 'false');
+      }
+      if (mode) {
+        pushKV('--coverage.mode', mode);
+      }
+      if (pageFit !== undefined) {
+        pushKV('--coverage.pageFit', pageFit ? 'true' : 'false');
+      }
+      // keep existing optional extras
+      if ((cfg as any).coverageUi) {
+        pushKV('--coverage-ui', (cfg as any).coverageUi);
+      }
+      if ((cfg as any).editorCmd) {
+        pushKV('--coverage.editor', (cfg as any).editorCmd);
+      }
+      if ((cfg as any).coverageDetail !== undefined) {
+        pushKV('--coverage.detail', (cfg as any).coverageDetail);
+      }
+      if ((cfg as any).coverageShowCode !== undefined) {
+        pushKV('--coverage.showCode', (cfg as any).coverageShowCode ? 'true' : 'false');
+      }
+      if ((cfg as any).coverageMaxFiles !== undefined) {
+        pushKV('--coverage.maxFiles', (cfg as any).coverageMaxFiles);
+      }
+      if ((cfg as any).coverageMaxHotspots !== undefined) {
+        pushKV('--coverage.maxHotspots', (cfg as any).coverageMaxHotspots);
+      }
+      if (Array.isArray((cfg as any).include) && (cfg as any).include.length) {
+        pushKV('--coverage.include', ((cfg as any).include as string[]).join(','));
+      }
+      if (Array.isArray((cfg as any).exclude) && (cfg as any).exclude.length) {
+        pushKV('--coverage.exclude', ((cfg as any).exclude as string[]).join(','));
+      }
+    }
+    // 3) Changed-context defaults (apply only when changed is active)
+    const changedFromCli = ((): string | undefined => {
+      for (let i = 0; i < argv.length; i += 1) {
+        const tok = String(argv[i] ?? '');
+        const nxt = i + 1 < argv.length ? String(argv[i + 1]) : undefined;
+        if (tok.startsWith('--changed=')) {
+          return tok.split('=')[1] ?? '';
+        }
+        if (tok === '--changed' && nxt) {
+          return nxt;
+        }
+      }
+      return undefined;
+    })();
+    const changedObj =
+      (cfg as any).changed && typeof (cfg as any).changed === 'object'
+        ? ((cfg as any).changed as Record<string, any>)
+        : (cfg as any).changedSection && typeof (cfg as any).changedSection === 'object'
+          ? ((cfg as any).changedSection as Record<string, any>)
+          : undefined;
+    const changedModeConfig =
+      typeof (cfg as any).changed === 'string' ? ((cfg as any).changed as string) : undefined;
+    const activeChangedMode = changedFromCli ?? changedModeConfig;
+    if (activeChangedMode) {
+      const defaultDepth = changedObj?.depth as number | undefined;
+      const perMode = changedObj?.[activeChangedMode];
+      const overrideDepth =
+        perMode && typeof perMode === 'object'
+          ? (perMode.depth as number | undefined)
+          : (perMode as number | undefined);
+      const finalDepth = overrideDepth ?? defaultDepth;
+      if (finalDepth !== undefined) {
+        pushKV('--changed.depth', finalDepth);
+      }
+      if (!changedFromCli && changedModeConfig) {
+        pushKV('--changed', changedModeConfig);
+      }
+    }
+    return t;
+  })();
   const {
     jestArgs,
     collectCoverage,
@@ -440,10 +555,10 @@ export const program = async (): Promise<void> => {
     coveragePageFit,
     changed,
     changedDepth,
-  } = deriveArgs(argv);
+  } = deriveArgs([...cfgTokens, ...argv]);
   // Derive changed-file selection (staged/unstaged/all) when requested
   const getChangedFiles = async (
-    mode: 'all' | 'staged' | 'unstaged' | 'branch',
+    mode: 'all' | 'staged' | 'unstaged' | 'branch' | 'lastCommit',
     cwd: string,
   ): Promise<readonly string[]> => {
     const collect = async (cmd: string, args: readonly string[]) => {
@@ -461,6 +576,19 @@ export const program = async (): Promise<void> => {
         return [] as string[];
       }
     };
+    if (mode === 'lastCommit') {
+      const lastDiff = await collect('git', [
+        'diff',
+        '--name-only',
+        '--diff-filter=ACMRTUXB',
+        'HEAD^',
+        'HEAD',
+      ]);
+      const rels = Array.from(new Set(lastDiff));
+      return rels
+        .map((rel) => path.resolve(cwd, rel).replace(/\\/g, '/'))
+        .filter((abs) => !abs.includes('/node_modules/') && !abs.includes('/coverage/'));
+    }
     if (mode === 'branch') {
       // Determine default branch (origin/HEAD -> ref or fall back to origin/main, origin/master)
       const resolveDefaultBranch = async (): Promise<string | undefined> => {
@@ -552,6 +680,15 @@ export const program = async (): Promise<void> => {
   );
   const selectionHasPaths = selectionPathsAugmented.length > 0;
   const repoRootForDiscovery = workspaceRoot ?? (await findRepoRoot());
+  // Detect name-pattern-only selection (no explicit file/path selection or changed files)
+  const containsNamePatternForDiscovery = jestArgs.some(
+    (arg) => arg === '-t' || arg === '--testNamePattern' || /^--testNamePattern=/.test(String(arg)),
+  );
+  const namePatternOnlyForDiscovery =
+    containsNamePatternForDiscovery &&
+    !selectionLooksLikePath &&
+    !selectionLooksLikeTest &&
+    (changedSelectionAbs?.length ?? 0) === 0;
 
   // Expand production selections from bare filenames or repo-root-relative suffixes
   const expandProductionSelections = async (
@@ -651,45 +788,121 @@ export const program = async (): Promise<void> => {
   }
 
   const perProjectFiles = new Map<string, string[]>();
-  if (selectionIncludesProdPaths) {
+  if (!namePatternOnlyForDiscovery && selectionIncludesProdPaths) {
     console.info(
       `Discovering (rg-first) → related=${selectionIncludesProdPaths} | cwd=${repoRootForDiscovery}`,
     );
     const prodSelections = expandedProdSelections;
-    for (const cfg of projectConfigs) {
-      const cfgCwd = path.dirname(cfg);
-      // eslint-disable-next-line no-await-in-loop
-      const allTests = await discoverJestResilient([...jestDiscoveryArgs, '--config', cfg], {
-        cwd: cfgCwd,
-      });
-      let directPerProject: readonly string[] = [];
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        directPerProject = await selectDirectTestsForProduction({
-          rootDir: repoRootForDiscovery,
-          testFiles: allTests,
-          productionFiles: prodSelections,
+    await Promise.all(
+      projectConfigs.map(async (cfg) => {
+        const cfgCwd = path.dirname(cfg);
+        const allTests = await discoverJestResilient([...jestDiscoveryArgs, '--config', cfg], {
+          cwd: cfgCwd,
         });
-      } catch (err) {
-        if (isDebug()) {
-          console.warn(`direct selection failed for project ${path.basename(cfg)}: ${String(err)}`);
+        let directPerProject: readonly string[] = [];
+        try {
+          directPerProject = await selectDirectTestsForProduction({
+            rootDir: repoRootForDiscovery,
+            testFiles: allTests,
+            productionFiles: prodSelections,
+          });
+        } catch (err) {
+          if (isDebug()) {
+            console.warn(
+              `direct selection failed for project ${path.basename(cfg)}: ${String(err)}`,
+            );
+          }
         }
-      }
-      perProjectFiles.set(cfg, directPerProject as string[]);
-    }
-  } else {
+        perProjectFiles.set(cfg, directPerProject as string[]);
+      }),
+    );
+  } else if (!namePatternOnlyForDiscovery) {
     console.info(
       `Discovering → jestArgs=${jestDiscoveryArgs.join(
         ' ',
       )} | related=${selectionIncludesProdPaths} | cwd=${repoRootForDiscovery}`,
     );
-    for (const cfg of projectConfigs) {
-      const cfgCwd = path.dirname(cfg);
-      // eslint-disable-next-line no-await-in-loop
-      const files = await discoverJestResilient([...jestDiscoveryArgs, '--config', cfg], {
-        cwd: cfgCwd,
-      });
-      perProjectFiles.set(cfg, files as string[]);
+    await Promise.all(
+      projectConfigs.map(async (cfg) => {
+        const cfgCwd = path.dirname(cfg);
+        const files = await discoverJestCached([...jestDiscoveryArgs, '--config', cfg], {
+          cwd: cfgCwd,
+        });
+        perProjectFiles.set(cfg, files as string[]);
+      }),
+    );
+  }
+
+  // Name-pattern-only: preselect candidate test files by ripgrep-ing for the pattern
+  if (namePatternOnlyForDiscovery) {
+    const extractTestNamePattern = (args: readonly string[]): string | undefined => {
+      for (let i = 0; i < args.length; i += 1) {
+        const token = String(args[i] ?? '');
+        if (token === '-t' && i + 1 < args.length) {
+          return String(args[i + 1]);
+        }
+        if (token === '--testNamePattern' && i + 1 < args.length) {
+          return String(args[i + 1]);
+        }
+        if (token.startsWith('--testNamePattern=')) {
+          return token.split('=')[1] ?? '';
+        }
+      }
+      return undefined;
+    };
+    const pattern = extractTestNamePattern(jestArgs);
+    const repoRoot = repoRootForDiscovery;
+    const rgCandidates = async (): Promise<readonly string[]> => {
+      if (!pattern || !pattern.trim()) {
+        return [] as const;
+      }
+      const args: string[] = [
+        '--no-messages',
+        '--line-number',
+        '--color',
+        'never',
+        '--files-with-matches',
+        '-e',
+        pattern,
+        '-g',
+        '**/*.test.*',
+        '-g',
+        '**/*.spec.*',
+        '-g',
+        'tests/**/*',
+        '-g',
+        '!**/node_modules/**',
+        '-g',
+        '!**/coverage/**',
+        '-g',
+        '!**/dist/**',
+        '-g',
+        '!**/build/**',
+      ];
+      try {
+        const out = await runText('rg', args, {
+          cwd: repoRoot,
+          env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
+          timeoutMs: 4000,
+        });
+        return out
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((rel) => path.resolve(repoRoot, rel).replace(/\\/g, '/'));
+      } catch {
+        return [] as const;
+      }
+    };
+    const matched = await rgCandidates();
+    if (matched.length > 0) {
+      const jestArgsForOwnership = jestDiscoveryArgs;
+      for (const cfg of projectConfigs) {
+        const cfgCwd = path.dirname(cfg);
+        // eslint-disable-next-line no-await-in-loop
+        const owned = await filterCandidatesForProject(cfg, jestArgsForOwnership, matched, cfgCwd);
+        perProjectFiles.set(cfg, owned as string[]);
+      }
     }
   }
 
@@ -718,8 +931,16 @@ export const program = async (): Promise<void> => {
     perProjectFiltered.set(cfg, onlyOwned as string[]);
   }
 
-  let jestFiles = Array.from(perProjectFiltered.values()).flat();
-  console.info(`Discovery results → jest=${jestFiles.length} (projects=${projectConfigs.length})`);
+  let jestFiles = namePatternOnlyForDiscovery
+    ? ([] as string[])
+    : Array.from(perProjectFiltered.values()).flat();
+  if (!namePatternOnlyForDiscovery) {
+    console.info(
+      `Discovery results → jest=${jestFiles.length} (projects=${projectConfigs.length})`,
+    );
+  } else {
+    console.info('Discovery skipped (name pattern only).');
+  }
 
   const looksLikeTestPath = (candidatePath: string) =>
     /\.(test|spec)\.[tj]sx?$/i.test(candidatePath) || /(^|\/)tests?\//i.test(candidatePath);
@@ -908,6 +1129,7 @@ export const program = async (): Promise<void> => {
             // eslint-disable-next-line no-await-in-loop
             const listed = await discoverJestResilient([...jestDiscoveryArgs, '--config', cfg], {
               cwd: cfgCwd,
+              // eslint-disable-next-line max-lines
             });
             allAcross.push(...listed);
           }
@@ -1096,11 +1318,12 @@ export const program = async (): Promise<void> => {
     selectionSpecified: selectionSpecifiedAugmented,
     selectionPaths: selectionPathsAugmented,
   });
-  const { shouldRunJest } = jestDecision;
+  const forcedByNamePattern = namePatternOnlyForDiscovery;
+  const shouldRunJest = forcedByNamePattern ? true : jestDecision.shouldRunJest;
   const jestCount = effectiveJestFiles.length;
-  const sharePct = Math.round(jestDecision.share * 100);
+  const sharePct = Math.round((forcedByNamePattern ? 1 : jestDecision.share) * 100);
   const msg = shouldRunJest
-    ? `Jest selected (${sharePct}% of discovered tests; reason: ${jestDecision.reason})`
+    ? `Jest selected (${sharePct}% of discovered tests; reason: ${forcedByNamePattern ? 'name_pattern' : jestDecision.reason})`
     : `Skipping Jest (${sharePct}% of discovered tests; reason: ${jestDecision.reason})`;
   console.info(`Discovery → jest: ${jestCount}. ${msg}`);
 
@@ -1125,9 +1348,9 @@ export const program = async (): Promise<void> => {
     const sanitizedJestRunArgs = jestRunArgs.filter(
       (arg) => !/^--coverageDirectory(?:=|$)/.test(String(arg)),
     );
-    const projectsToRun = projectConfigs.filter(
-      (cfg) => (perProjectFiltered.get(cfg) ?? []).length > 0,
-    );
+    const projectsToRun = namePatternOnlyForDiscovery
+      ? projectConfigs
+      : projectConfigs.filter((cfg) => (perProjectFiltered.get(cfg) ?? []).length > 0);
     const stripFooter = (text: string): string => {
       const lines = text.split('\n');
       const idx = lines.findIndex((ln) => /^Test Files\s/.test(stripAnsiSimple(ln)));
@@ -1154,13 +1377,11 @@ export const program = async (): Promise<void> => {
       productionSeeds: prodSeedsForRun,
     });
 
-    for (let projIndex = 0; projIndex < projectsToRun.length; projIndex += 1) {
-      const cfg = projectsToRun[projIndex]!;
+    const runOneProject = async (cfg: string): Promise<void> => {
       const files = perProjectFiltered.get(cfg) ?? [];
       if (files.length === 0) {
         console.info(`Project ${path.basename(cfg)}: 0 matching tests after filter; skipping.`);
-        // eslint-disable-next-line no-continue
-        continue;
+        return;
       }
       files.forEach((absTestPath) =>
         executedTestFilesSet.add(path.resolve(absTestPath).replace(/\\/g, '/')),
@@ -1213,15 +1434,11 @@ export const program = async (): Promise<void> => {
         coverageFromArgs.push('--collectCoverageFrom', relPath);
       }
 
-      // eslint-disable-next-line no-await-in-loop
-      const fullArgs = [
-        '--extensions',
-        '.js,.ts',
-        jestBin,
+      const runArgs = [
         '--config',
         cfg,
         '--testLocationInResults',
-        '--runTestsByPath',
+        ...(namePatternOnlyForDiscovery ? [] : ['--runTestsByPath']),
         `--reporters=${reporterPath}`,
         '--colors',
         ...sanitizedJestRunArgs,
@@ -1232,25 +1449,19 @@ export const program = async (): Promise<void> => {
             ]
           : []),
         ...coverageFromArgs,
-        // // Force our environment last so user flags/config cannot override it
-        // '--testEnvironment',
-        // path.resolve('scripts/jest-bridge-env.cjs'),
-        // // Back-compat for older Jest versions which use --env
-        // '--env',
-        // path.resolve('scripts/jest-bridge-env.cjs'),
         ...(showLogs ? ['--no-silent'] : []),
         '--passWithNoTests',
         '--verbose',
-        ...files,
+        ...(namePatternOnlyForDiscovery ? [] : files),
       ];
       if (isDebug() || showLogs) {
-        const hasSilentFalse = fullArgs.includes('--silent=false');
-        const hasEnv = fullArgs.includes('--testEnvironment');
+        const hasSilentFalse = runArgs.includes('--silent=false');
+        const hasEnv = runArgs.includes('--testEnvironment');
         console.info(
           `debug: showLogs=${String(showLogs)} hasSilentFalse=${String(hasSilentFalse)} hasTestEnvironment=${String(hasEnv)}`,
         );
       }
-      const { code, output } = await runWithCapture(babelNodeBin, fullArgs, {
+      const { code, output } = await runWithCapture(jestBin, runArgs, {
         env: safeEnv(process.env, {
           NODE_ENV: 'test',
           JEST_BRIDGE_OUT: outJson,
@@ -1274,6 +1485,46 @@ export const program = async (): Promise<void> => {
         const jsonText = fsSync.readFileSync(outJson, 'utf8');
         const parsed = JSON.parse(jsonText) as unknown;
         const bridgeBase = coerceJestJsonToBridge(parsed);
+        const filteredForNamePattern = (() => {
+          if (!namePatternOnlyForDiscovery) {
+            return bridgeBase;
+          }
+          const keptFiles = bridgeBase.testResults
+            .map((file) => ({
+              ...file,
+              testResults: file.testResults.filter(
+                (t) => t.status === 'passed' || t.status === 'failed',
+              ),
+            }))
+            .filter((file) => file.testResults.length > 0);
+          const numFailedTests = keptFiles
+            .flatMap((f) => f.testResults)
+            .filter((t) => t.status === 'failed').length;
+          const numPassedTests = keptFiles
+            .flatMap((f) => f.testResults)
+            .filter((t) => t.status === 'passed').length;
+          const numTotalTests = numFailedTests + numPassedTests;
+          const numFailedSuites = keptFiles.filter((f) =>
+            f.testResults.some((t) => t.status === 'failed'),
+          ).length;
+          const numPassedSuites = keptFiles.length - numFailedSuites;
+          return {
+            ...bridgeBase,
+            testResults: keptFiles,
+            aggregated: {
+              ...bridgeBase.aggregated,
+              numTotalTestSuites: keptFiles.length,
+              numPassedTestSuites: numPassedSuites,
+              numFailedTestSuites: numFailedSuites,
+              numTotalTests,
+              numPassedTests,
+              numFailedTests,
+              numPendingTests: 0,
+              numTodoTests: 0,
+              success: numFailedTests === 0,
+            },
+          } as typeof bridgeBase;
+        })();
         // Parse bridge events and summarize for debugging
         const consoleByFile = (() => {
           const by = new Map<string, Array<{ type?: string; message?: string; origin?: string }>>();
@@ -1306,16 +1557,25 @@ export const program = async (): Promise<void> => {
               const testPath =
                 typeof obj.testPath === 'string' ? obj.testPath.replace(/\\/g, '/') : undefined;
               totalEvents += 1;
-              if (obj.type === 'envReady') envReadyCount += 1;
-              if (obj.type === 'console') consoleCount += 1;
-              if (obj.type === 'consoleBatch') consoleBatchCount += 1;
+              if (obj.type === 'envReady') {
+                envReadyCount += 1;
+              }
+              if (obj.type === 'console') {
+                consoleCount += 1;
+              }
+              if (obj.type === 'consoleBatch') {
+                consoleBatchCount += 1;
+              }
               if (
                 obj.type === 'httpResponse' ||
                 obj.type === 'httpAbort' ||
                 obj.type === 'httpResponseBatch'
-              )
+              ) {
                 httpCount += 1;
-              if (obj.type === 'assertionFailure') assertionCount += 1;
+              }
+              if (obj.type === 'assertionFailure') {
+                assertionCount += 1;
+              }
               if (!testPath) {
                 continue;
               } // eslint-disable-line no-continue
@@ -1337,24 +1597,30 @@ export const program = async (): Promise<void> => {
               );
               // process.exit(1);
             }
-          } catch {}
+          } catch {
+            /* ignore */
+          }
           return by;
         })();
         const bridge = (() => {
           if (consoleByFile.size === 0) {
-            return bridgeBase;
+            return filteredForNamePattern;
           }
-          const files = bridgeBase.testResults.map((file) => {
-            const key = String(file.testFilePath || '').replace(/\\/g, '/');
-            const extra = consoleByFile.get(key) || [];
-            if (!extra.length) {
-              return file;
+          const files = filteredForNamePattern.testResults.map((fileResult) => {
+            const key = String(fileResult.testFilePath || '').replace(/\\/g, '/');
+            const extraEntries = consoleByFile.get(key) || [];
+            if (!extraEntries.length) {
+              return fileResult;
             }
             const mergedConsole = [
-              ...((file as any).console || []),
-              ...extra.map((c) => ({ message: c.message, type: c.type, origin: c.origin })),
+              ...((fileResult as any).console || []),
+              ...extraEntries.map((entry) => ({
+                message: entry.message,
+                type: entry.type,
+                origin: entry.origin,
+              })),
             ];
-            return { ...(file as any), console: mergedConsole } as typeof file;
+            return { ...(fileResult as any), console: mergedConsole } as typeof fileResult;
           });
           if (isDebug() || showLogs) {
             const sample = files
@@ -1368,7 +1634,7 @@ export const program = async (): Promise<void> => {
               .slice(0, 5);
             console.info(`debug: per-file console counts (first 5): ${JSON.stringify(sample)}`);
           }
-          return { ...bridgeBase, testResults: files } as typeof bridgeBase;
+          return { ...filteredForNamePattern, testResults: files } as typeof filteredForNamePattern;
         })();
         allBridgeJson.push(bridge);
         // Reorder per-file results by directness and failure before rendering
@@ -1446,7 +1712,11 @@ export const program = async (): Promise<void> => {
       if (Number(code) !== 0) {
         jestExitCode = code;
       }
-    }
+    };
+    // Run projects concurrently with a fixed stride to avoid shared-counter races
+    await runParallelStride(projectsToRun, 3, async (cfg, index) => {
+      await runOneProject(cfg as string);
+    });
   } else {
     console.info('Jest run skipped based on selection and thresholds.');
   }
@@ -1471,6 +1741,8 @@ export const program = async (): Promise<void> => {
         numFailedTests: sum((item) => item.numFailedTests),
         numPendingTests: sum((item) => item.numPendingTests),
         numTodoTests: sum((item) => item.numTodoTests),
+        numTimedOutTests: sum((item) => Number((item as any).numTimedOutTests ?? 0)),
+        numTimedOutTestSuites: sum((item) => Number((item as any).numTimedOutTestSuites ?? 0)),
         startTime,
         success: agg.every((item) => Boolean(item.success)),
         runTimeMs: sum((item) => Number(item.runTimeMs ?? 0)),
