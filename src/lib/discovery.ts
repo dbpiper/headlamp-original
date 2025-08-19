@@ -256,7 +256,6 @@ export const filterCandidatesForProject = async (
     .map((absOrRel) => (path.isAbsolute(absOrRel) ? path.relative(cwd, absOrRel) : absOrRel))
     .map(toPosixNormalized);
 
-  console.log('relativePatterns:', relativePatterns);
   let attemptPatterns: string[] = [];
   try {
     attemptPatterns = await discoverJest([...jestArgs, '--config', cfgPath], {
@@ -270,13 +269,39 @@ export const filterCandidatesForProject = async (
     toPosixNormalized(candidatePath),
   );
   if (normalizedAttemptPatterns.length > 0) {
+    console.info(`Selected files → count=${normalizedAttemptPatterns.length}`);
+    console.info('Selected files →');
+    normalizedAttemptPatterns.forEach((pattern) => console.info(` - ${pattern}`));
     return normalizedAttemptPatterns as readonly string[];
   }
-  // Fallback: if Jest couldn't list,
-  // pass the relative patterns as absolute paths for '--runTestsByPath'
+  // Fallback: if Jest couldn't list, try suffix-match against the project's test list
+  try {
+    const allInProject = await discoverJestResilient([...jestArgs, '--config', cfgPath], {
+      cwd,
+    });
+    const normalizedAll = allInProject.map((p) => toPosixNormalized(p));
+    const bySuffix = normalizedAll.filter((abs) =>
+      relativePatterns.some(
+        (rel) =>
+          abs.endsWith(`/${rel}`) || abs.endsWith(rel) || abs.endsWith(`/${rel.split('/').pop()}`),
+      ),
+    );
+    if (bySuffix.length > 0) {
+      console.info(`Selected files → count=${bySuffix.length}`);
+      console.info('Selected files →');
+      bySuffix.forEach((p) => console.info(` - ${p}`));
+      return bySuffix as readonly string[];
+    }
+  } catch {
+    /* ignore */
+  }
+  // Final fallback: pass the relative patterns as absolute paths for '--runTestsByPath'
   const absoluteFromRelative = relativePatterns.map((rel) =>
     toPosixNormalized(path.join(cwd, rel)),
   );
+  console.info(`Selected files → count=${absoluteFromRelative.length}`);
+  console.info('Selected files →');
+  absoluteFromRelative.forEach((p) => console.info(` - ${p}`));
   return absoluteFromRelative as readonly string[];
 };
 

@@ -1,4 +1,5 @@
 const baseRules = {
+  'no-await-in-loop': 'warn',
   'max-lines': ['warn', 1000],
   'no-magic-numbers': 'warn',
   '@typescript-eslint/no-explicit-any': 'warn',

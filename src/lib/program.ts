@@ -787,7 +787,10 @@ export const program = async (): Promise<void> => {
   );
   const stripPathTokens = (args: readonly string[]) =>
     args.filter((token) => !selectionPathsAugmented.includes(token));
-  const jestDiscoveryArgs = selectionIncludesProdPaths ? stripPathTokens(jest) : jest;
+  const jestDiscoveryArgs =
+    selectionIncludesProdPaths || (selectionHasPaths && selectionLooksLikeTest)
+      ? stripPathTokens(jest)
+      : jest;
 
   const projectConfigs: string[] = [];
   try {
@@ -804,7 +807,21 @@ export const program = async (): Promise<void> => {
   }
 
   const perProjectFiles = new Map<string, string[]>();
-  if (!namePatternOnlyForDiscovery && selectionIncludesProdPaths) {
+  if (!namePatternOnlyForDiscovery && selectionLooksLikeTest && selectionHasPaths) {
+    // Fast-path: explicit test file(s) selected → constrain per-project candidates to those
+    await Promise.all(
+      projectConfigs.map(async (cfg) => {
+        const cfgCwd = path.dirname(cfg);
+        const owned = await filterCandidatesForProject(
+          cfg,
+          jestDiscoveryArgs,
+          resolvedSelectionTestPaths as readonly string[],
+          cfgCwd,
+        );
+        perProjectFiles.set(cfg, owned as string[]);
+      }),
+    );
+  } else if (!namePatternOnlyForDiscovery && selectionIncludesProdPaths) {
     console.info(
       `Discovering (rg-first) → related=${selectionIncludesProdPaths} | cwd=${repoRootForDiscovery}`,
     );
@@ -925,10 +942,7 @@ export const program = async (): Promise<void> => {
   const perProjectFiltered = new Map<string, string[]>();
   for (const cfg of projectConfigs) {
     const files = perProjectFiles.get(cfg) ?? [];
-    const selectionTestPaths = selectionPathsAugmented.filter(
-      (pathToken) =>
-        /\.(test|spec)\.[tj]sx?$/i.test(pathToken) || /(^|\/)tests?\//i.test(pathToken),
-    );
+    const selectionTestPaths = selectionPathsAugmented.filter(isTestLikePathToken);
     const selectionTestAbs = resolvedSelectionTestPaths.length
       ? resolvedSelectionTestPaths
       : selectionTestPaths;
@@ -1363,7 +1377,17 @@ export const program = async (): Promise<void> => {
   if (shouldRunJest) {
     console.info('Starting Jest (no Vitest targets)…');
     await runJestBootstrap(bootstrapCommand);
-    const jestRunArgs = selectionIncludesProdPaths ? stripPathTokens(jestArgs) : jestArgs;
+    const jestRunArgs = selectionIncludesProdPaths
+      ? stripPathTokens(jestArgs)
+      : selectionHasPaths && selectionLooksLikeTest && (resolvedSelectionTestPaths?.length ?? 0) > 0
+        ? (() => {
+            const base = stripPathTokens(jestArgs);
+            const resolved = (resolvedSelectionTestPaths ?? []).map((absPath) =>
+              path.resolve(absPath).replace(/\\/g, '/'),
+            );
+            return [...base, ...resolved];
+          })()
+        : jestArgs;
     const sanitizedJestRunArgs = jestRunArgs.filter(
       (arg) => !/^--coverageDirectory(?:=|$)/.test(String(arg)),
     );
