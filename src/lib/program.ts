@@ -10,7 +10,7 @@ import * as Reports from 'istanbul-reports';
 import { createCoverageMap } from 'istanbul-lib-coverage';
 
 import { safeEnv } from './env-utils';
-import { runExitCode, runText, runWithCapture } from './_exec';
+import { runExitCode, runText, runWithStreaming } from './_exec';
 import { deriveArgs } from './args';
 import {
   findRepoRoot,
@@ -26,8 +26,6 @@ import {
   printCompactCoverage,
   printDetailedCoverage,
 } from './coverage-print';
-import { JEST_BRIDGE_REPORTER_SOURCE } from './jest-reporter-source';
-import { JEST_BRIDGE_ENV_SOURCE } from './jest-environment-source';
 import { formatJestOutputVitest } from './formatJestOutputVitest';
 import {
   renderVitestFromJestJSON,
@@ -36,7 +34,10 @@ import {
 } from './formatter/bridge';
 import { makeCtx } from './formatter/context';
 import { stripAnsiSimple } from './stacks';
-import { tintPct } from './bars';
+import { shortenPathPreservingFilename } from './path-shorten';
+import { tintPct, barNeutral } from './bars';
+import { ansi } from './ansi';
+import { Colors } from './colors';
 import { selectDirectTestsForProduction } from './graph-distance';
 import { computeDirectnessRank, sortTestResultsWithRank } from './relevance';
 import { runParallelStride } from './parallel';
@@ -1378,6 +1379,117 @@ export const program = async (): Promise<void> => {
       productionSeeds: prodSeedsForRun,
     });
 
+    // live progress (TTY only): suites across all projects
+    const useTty = Boolean(process.stdout.isTTY);
+    // Derive planned suite count; for name-pattern runs, pre-count via --listTests
+    const jestArgsForPlan = selectionIncludesProdPaths ? stripPathTokens(jestArgs) : jestArgs;
+    const sanitizedPlanArgs = jestArgsForPlan.filter(
+      (arg) => !/^--coverageDirectory(?:=|$)/.test(String(arg)),
+    );
+    const computePlannedSuites = async (): Promise<number> => {
+      const discovered = projectsToRun.reduce(
+        (total, cfg) => total + (perProjectFiltered.get(cfg)?.length ?? 0),
+        0,
+      );
+      if (discovered > 0) {
+        return discovered;
+      }
+      // Discovery found zero; ask Jest for the list of matching test files per project
+      let sum = 0;
+      for (const cfg of projectsToRun) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const listed = await runText(
+            jestBin,
+            ['--config', cfg, ...sanitizedPlanArgs, '--listTests'],
+            {
+              env: safeEnv(process.env, {
+                NODE_ENV: 'test',
+                FORCE_COLOR: '0',
+              }) as unknown as NodeJS.ProcessEnv,
+            },
+          );
+          const count = listed
+            .split(/\r?\n/)
+            .map((ln) => ln.trim())
+            .filter(Boolean).length;
+          sum += count;
+        } catch {
+          // ignore list failures; fall back to discovered count
+        }
+      }
+      return sum || discovered;
+    };
+    const totalSuitesPlanned = await computePlannedSuites();
+    let suitesDone = 0;
+    let currentTestPreview = '';
+    // Track last bridge/update event to show a heartbeat and type
+    let lastEvent = { type: 'init', text: 'waiting for Jest…', at: Date.now() } as {
+      type: string;
+      text: string;
+      at: number;
+    };
+    const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let spinnerIndex = 0;
+    let progressTimer: NodeJS.Timeout | undefined;
+    let heartbeatTimer: NodeJS.Timeout | undefined;
+    const renderProgress = () => {
+      const pct =
+        totalSuitesPlanned > 0
+          ? Math.max(0, Math.min(100, Math.floor((suitesDone / totalSuitesPlanned) * 100)))
+          : 0;
+      const barText = barNeutral(pct, 24);
+      const nameText = currentTestPreview ? ` ${ansi.white(currentTestPreview)}` : '';
+      const ageSec = Math.max(0, Math.floor((Date.now() - lastEvent.at) / 1000));
+      const spinner = spinnerFrames[spinnerIndex % spinnerFrames.length];
+      const trim = (s: string, maxLen: number) =>
+        s.length > maxLen ? `${s.slice(0, Math.max(0, maxLen - 1))}…` : s;
+      const eventHead = (() => {
+        const labelRaw = lastEvent.text || '';
+        const shortened = shortenPathPreservingFilename(labelRaw, 36);
+        return `${ansi.dim('[')}${ansi.gray(spinner)} ${ansi.cyan(lastEvent.type)}${ansi.dim(':')}${ansi.white(
+          shortened,
+        )}${ansi.dim(` +${ageSec}s]`)}`;
+      })();
+      // Put event (with spinner) up front so it's visible even when the line is clipped
+      const line = `${Colors.Run('RUN')} ${eventHead} ${barText} ${String(pct).padStart(
+        3,
+        ' ',
+      )}% ${ansi.dim(`(${suitesDone}/${totalSuitesPlanned})`)}${nameText}`;
+      const cols =
+        typeof process.stdout.columns === 'number' && process.stdout.columns > 0
+          ? process.stdout.columns
+          : 120;
+      const clipped = line.length > cols ? `${line.slice(0, Math.max(0, cols - 1))}` : line;
+      const pad = Math.max(0, cols - clipped.length - 1);
+      process.stdout.write(`\r${clipped}${' '.repeat(pad)}`);
+    };
+    renderProgress();
+    try {
+      progressTimer = setInterval(() => {
+        spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
+        renderProgress();
+      }, 120);
+    } catch {}
+    // Heartbeat line (newline-terminated) so users see
+    // periodic updates even when CR rendering isn't visible
+    try {
+      heartbeatTimer = setInterval(() => {
+        const pct =
+          totalSuitesPlanned > 0
+            ? Math.max(0, Math.min(100, Math.floor((suitesDone / totalSuitesPlanned) * 100)))
+            : 0;
+        const ageSec = Math.max(0, Math.floor((Date.now() - lastEvent.at) / 1000));
+        const latestLabel = shortenPathPreservingFilename(lastEvent.text || '', 60);
+        const status = `${Colors.Run('Progress')} ${String(pct).padStart(3, ' ')}% (${suitesDone}/${
+          totalSuitesPlanned
+        }) ${ansi.cyan('Latest')} ${ansi.white(latestLabel)} (${ansi.cyan(lastEvent.type)} +${ageSec}s)`;
+        try {
+          process.stdout.write(`${status}\n`);
+        } catch {}
+      }, 2000);
+    } catch {}
+
     const runOneProject = async (cfg: string): Promise<void> => {
       const files = perProjectFiltered.get(cfg) ?? [];
       if (files.length === 0) {
@@ -1391,32 +1503,84 @@ export const program = async (): Promise<void> => {
         os.tmpdir(),
         `jest-bridge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
       );
-      const reporterPath = path.join(os.tmpdir(), 'headlamp', 'jest-vitest-bridge.cjs');
+      const reporterPath = path.join(os.tmpdir(), 'headlamp', 'reporter.cjs');
+      const envPath = path.join(os.tmpdir(), 'headlamp', 'environment.cjs');
+      // Resolve package root robustly (works under yalc, workspace, or published)
+      const findPackageRoot = (startDir: string): string => {
+        let dir = path.resolve(startDir);
+        for (let depth = 0; depth < 6; depth += 1) {
+          try {
+            const pkg = path.join(dir, 'package.json');
+            if (fsSync.existsSync(pkg)) return dir;
+          } catch {
+            /* ignore */
+          }
+          const parent = path.dirname(dir);
+          if (parent === dir) break;
+          dir = parent;
+        }
+        return path.resolve(__dirname, '..', '..');
+      };
+      const packageRoot = findPackageRoot(__dirname);
+      const distJestDir = path.resolve(packageRoot, 'dist', 'jest');
+      const srcJestDir = path.resolve(packageRoot, 'src', 'jest');
+      const assetEnvPathDist = path.join(distJestDir, 'environment.cjs');
+      const assetReporterPathDist = path.join(distJestDir, 'reporter.cjs');
+      const assetEnvPathSrc = path.join(srcJestDir, 'environment.cjs');
+      const assetReporterPathSrc = path.join(srcJestDir, 'reporter.cjs');
       try {
+        // Prefer built assets; fallback to src/jest in dev (yalc/workspace)
+        const haveDist =
+          fsSync.existsSync(assetReporterPathDist) && fsSync.existsSync(assetEnvPathDist);
+        const useReporterSrc = haveDist ? assetReporterPathDist : assetReporterPathSrc;
+        const useEnvSrc = haveDist ? assetEnvPathDist : assetEnvPathSrc;
+        if (!fsSync.existsSync(useReporterSrc) || !fsSync.existsSync(useEnvSrc)) {
+          throw new Error(
+            `Headlamp jest assets not found. Tried:\n  ${assetReporterPathDist}\n  ${assetEnvPathDist}\n  ${assetReporterPathSrc}\n  ${assetEnvPathSrc}\nPlease build the package or ensure src/jest exists.`,
+          );
+        }
         const needsWrite = (() => {
           try {
             const existing = fsSync.readFileSync(reporterPath, 'utf8');
-            return existing !== JEST_BRIDGE_REPORTER_SOURCE;
+            const desired = fsSync.readFileSync(useReporterSrc, 'utf8');
+            return existing !== desired;
           } catch {
             return true;
           }
         })();
         if (needsWrite) {
           fsSync.mkdirSync(path.dirname(reporterPath), { recursive: true });
-          fsSync.writeFileSync(reporterPath, JEST_BRIDGE_REPORTER_SOURCE, 'utf8');
+          try {
+            fsSync.copyFileSync(useReporterSrc, reporterPath);
+          } catch {
+            /* ignore */
+          }
         }
         // ensure environment file exists
-        const envPath = path.join(os.tmpdir(), 'headlamp', 'jest-bridge-env.cjs');
         try {
-          const existingEnv = fsSync.readFileSync(envPath, 'utf8');
-          if (existingEnv !== JEST_BRIDGE_ENV_SOURCE) {
-            fsSync.writeFileSync(envPath, JEST_BRIDGE_ENV_SOURCE, 'utf8');
+          const outOfDate = (() => {
+            try {
+              const existingEnv = fsSync.readFileSync(envPath, 'utf8');
+              const desiredEnv = fsSync.readFileSync(useEnvSrc, 'utf8');
+              return existingEnv !== desiredEnv;
+            } catch {
+              return true;
+            }
+          })();
+          if (outOfDate) {
+            fsSync.copyFileSync(useEnvSrc, envPath);
           }
         } catch {
           try {
             fsSync.mkdirSync(path.dirname(envPath), { recursive: true });
-          } catch {}
-          fsSync.writeFileSync(envPath, JEST_BRIDGE_ENV_SOURCE, 'utf8');
+          } catch {
+            /* ignore mkdir error */
+          }
+          try {
+            fsSync.copyFileSync(useEnvSrc, envPath);
+          } catch {
+            /* ignore */
+          }
         }
       } catch (ensureReporterError) {
         console.warn(`Unable to ensure jest bridge reporter: ${String(ensureReporterError)}`);
@@ -1436,12 +1600,17 @@ export const program = async (): Promise<void> => {
       }
 
       const runArgs = [
-        '--config',
-        cfg,
+        // Include our bridge reporter and also Jest's default reporter
+        // so PASS/FAIL lines are printed
+        // and progress can advance even if bridge events are not seen.
+        ...(cfg && cfg !== '<default>' ? (['--config', cfg] as const) : ([] as const)),
         '--testLocationInResults',
         ...(namePatternOnlyForDiscovery ? [] : ['--runTestsByPath']),
         `--reporters=${reporterPath}`,
+        '--reporters=default',
         '--colors',
+        '--testEnvironment',
+        envPath,
         ...sanitizedJestRunArgs,
         ...(collectCoverage
           ? [
@@ -1462,7 +1631,8 @@ export const program = async (): Promise<void> => {
           `debug: showLogs=${String(showLogs)} hasSilentFalse=${String(hasSilentFalse)} hasTestEnvironment=${String(hasEnv)}`,
         );
       }
-      const { code, output } = await runWithCapture(jestBin, runArgs, {
+      let streamBuf = '';
+      const { code, output } = await runWithStreaming(jestBin, runArgs, {
         env: safeEnv(process.env, {
           NODE_ENV: 'test',
           JEST_BRIDGE_OUT: outJson,
@@ -1473,7 +1643,113 @@ export const program = async (): Promise<void> => {
           FORCE_COLOR: '3',
           TERM: process.env.TERM || 'xterm-256color',
         }) as unknown as NodeJS.ProcessEnv,
+        onChunk: (text: string) => {
+          streamBuf += text;
+          const lines = streamBuf.split(/\r?\n/);
+          streamBuf = lines.pop() ?? '';
+          for (const rawLine of lines) {
+            const line = String(rawLine);
+            const idx = line.indexOf('[JEST-BRIDGE-EVENT]');
+            if (idx >= 0) {
+              const payload = line.slice(idx + '[JEST-BRIDGE-EVENT]'.length).trim();
+              try {
+                const obj = JSON.parse(payload) as any;
+                if (obj && obj.type === 'testStart') {
+                  const name: string = obj.currentTestName || '';
+                  const file: string = typeof obj.testPath === 'string' ? obj.testPath : '';
+                  const short = file ? `${path.basename(file)} > ${name}` : name;
+                  currentTestPreview = short;
+                  lastEvent = { type: 'test', text: short || 'start', at: Date.now() };
+                  renderProgress();
+                } else if (obj && obj.type === 'suiteComplete') {
+                  suitesDone += 1;
+                  currentTestPreview = obj && obj.testPath ? path.basename(obj.testPath) : '';
+                  const passed = Number(obj.numPassingTests || 0);
+                  const failed = Number(obj.numFailingTests || 0);
+                  const base = currentTestPreview || (obj && obj.testPath ? obj.testPath : 'suite');
+                  lastEvent = {
+                    type: 'suite',
+                    text: `${base} ✓${passed}${failed ? ` ✗${failed}` : ''}`,
+                    at: Date.now(),
+                  };
+                  renderProgress();
+                } else if (obj && obj.type === 'envReady') {
+                  lastEvent = { type: 'env', text: 'environment ready', at: Date.now() };
+                  renderProgress();
+                } else if (obj && obj.type === 'console') {
+                  lastEvent = {
+                    type: 'console',
+                    text: String(obj.level || 'log'),
+                    at: Date.now(),
+                  };
+                  renderProgress();
+                } else if (obj && obj.type === 'consoleBatch') {
+                  const n = Array.isArray(obj.entries) ? obj.entries.length : 0;
+                  lastEvent = { type: 'console', text: `${n} entries`, at: Date.now() };
+                  renderProgress();
+                } else if (obj && obj.type === 'httpResponseBatch') {
+                  const n = Array.isArray(obj.events) ? obj.events.length : 0;
+                  lastEvent = { type: 'http', text: `${n} events`, at: Date.now() };
+                  renderProgress();
+                } else if (
+                  obj &&
+                  (obj.type === 'unhandledRejection' || obj.type === 'uncaughtException')
+                ) {
+                  const msg = obj && obj.message ? String(obj.message) : 'error';
+                  lastEvent = { type: 'error', text: msg.slice(0, 80), at: Date.now() };
+                  renderProgress();
+                }
+              } catch {
+                /* ignore malformed bridge line */
+              }
+              continue;
+            }
+            // Track currently running file and count completed suites by RUNS/PASS/FAIL lines
+            try {
+              const simple = stripAnsiSimple(line);
+              if (/^\s*RUNS\s+/.test(simple)) {
+                const m = simple.match(/^\s*RUNS\s+(.*)$/);
+                const fileText = m ? m[1] : undefined;
+                const base = fileText ? path.basename(fileText) : '';
+                currentTestPreview = base;
+                lastEvent = { type: 'runs', text: base || fileText || '', at: Date.now() };
+                renderProgress();
+              }
+              if (/^\s*(PASS|FAIL)\s+/.test(simple)) {
+                suitesDone += 1;
+                const m = simple.match(/^\s*(PASS|FAIL)\s+(.*)$/);
+                if (m) {
+                  lastEvent = {
+                    type: m[1] === 'PASS' ? 'pass' : 'fail',
+                    text: m[2],
+                    at: Date.now(),
+                  };
+                } else {
+                  lastEvent = { type: 'status', text: simple.slice(0, 80), at: Date.now() };
+                }
+                renderProgress();
+              }
+            } catch {
+              /* ignore progress counting issues */
+            }
+          }
+        },
       });
+      if (progressTimer) {
+        try {
+          clearInterval(progressTimer);
+        } catch {}
+        progressTimer = undefined;
+      }
+      if (heartbeatTimer) {
+        try {
+          clearInterval(heartbeatTimer);
+        } catch {}
+        heartbeatTimer = undefined;
+      }
+      try {
+        if (useTty) process.stdout.write('\n');
+      } catch {}
       let pretty = '';
       try {
         const debug = isDebug();
@@ -1708,6 +1984,9 @@ export const program = async (): Promise<void> => {
       // Always drop per-project footer; we'll print a unified summary later
       pretty = stripFooter(pretty);
       if (pretty.trim().length > 0) {
+        if (useTty) {
+          process.stdout.write('\n');
+        }
         process.stdout.write(pretty.endsWith('\n') ? pretty : `${pretty}\n`);
       }
       if (Number(code) !== 0) {

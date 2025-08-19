@@ -28,3 +28,15 @@ export const bar = (pct: number, width = DEFAULT_BAR_WIDTH): string => {
     empty.repeat(Math.max(MIN_REMAINING, width - filled)),
   )}`;
 };
+
+// Neutral progress bar variant: always uses a single calm "Run" color
+// regardless of percentage thresholds (success/warn/failure colors are for coverage, not progress).
+export const barNeutral = (pct: number, width = DEFAULT_BAR_WIDTH): string => {
+  const filled = Math.round((pct / PERCENT_MAX) * width);
+  const solid = supportsUnicode() ? '█' : '#';
+  const empty = supportsUnicode() ? '░' : '-';
+  const MIN_REMAINING = 0;
+  return `${Colors.Run(solid.repeat(filled))}${ansi.gray(
+    empty.repeat(Math.max(MIN_REMAINING, width - filled)),
+  )}`;
+};

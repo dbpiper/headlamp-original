@@ -1,6 +1,8 @@
-import { build } from 'esbuild';
-import { rm, mkdir, writeFile, chmod } from 'node:fs/promises';
+import { rm, mkdir, writeFile, chmod, cp } from 'node:fs/promises';
 import { resolve } from 'node:path';
+
+// eslint-disable-next-line import/no-extraneous-dependencies
+import { build } from 'esbuild';
 
 const root = resolve(new URL('.', import.meta.url).pathname, '..');
 const src = resolve(root, 'src');
@@ -115,3 +117,7 @@ const cliPath = resolve(dist, 'cli.cjs');
 const cliContent = await (await import('node:fs/promises')).readFile(cliPath, 'utf8');
 await writeFile(cliPath, `#!/usr/bin/env node\n${cliContent}`);
 await chmod(cliPath, 0o755);
+
+// Copy Jest runtime assets (env/reporter) to dist so Jest can require them by absolute path
+await mkdir(resolve(dist, 'jest'), { recursive: true });
+await cp(resolve(src, 'jest'), resolve(dist, 'jest'), { recursive: true });

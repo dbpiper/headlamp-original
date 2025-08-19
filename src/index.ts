@@ -8,7 +8,6 @@ export * from './lib/discovery';
 export * from './lib/coverage-core';
 export * from './lib/coverage-print';
 export * from './lib/formatJestOutputVitest';
-export * from './lib/jest-reporter-source';
 export * from './lib/formatter/bridge';
 export * from './lib/formatter/fns';
 export * from './lib/formatter/context';

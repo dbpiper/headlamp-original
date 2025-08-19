@@ -1,6 +1,6 @@
 {
   "name": "headlamp",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "Coverage-first, runner-agnostic test UX CLI for Jest",
   "type": "module",
   "main": "dist/index.js",
@@ -23,8 +23,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "release": "npm publish --access public",
-    "build:yalc": "npm run build && npx yalc publish && node ./scripts/print-publish-log.mjs",
-    "dev:yalc": "nodemon -w src -e ts,tsx,js,jsx -d 700ms -x \"npm run build:yalc\""
+    "build:yalc": "npm run build && npx yalc publish --push && node ./scripts/print-publish-log.mjs",
+    "dev:yalc": "nodemon -w src -w src/jest -e ts,tsx,js,jsx,cjs -d 300ms -x \"npm run build:yalc\""
   },
   "keywords": [
     "testing",

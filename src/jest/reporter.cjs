@@ -1,5 +1,16 @@
-export const JEST_BRIDGE_REPORTER_SOURCE = `const fs = require('fs');
-const path = require('path');
+/* eslint-disable global-require */
+/* eslint-disable @typescript-eslint/no-require-imports */
+/* eslint-disable import/no-dynamic-require */
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const print = (payload) => {
+  try {
+    const line = `[JEST-BRIDGE-EVENT] ${JSON.stringify(payload)}`;
+    (process.stderr || process.stdout).write(`${line}\n`);
+  } catch {}
+};
 
 const isObject = (v) => typeof v === 'object' && v !== null;
 const sanitizeError = (err) => {
@@ -16,7 +27,12 @@ const sanitizeError = (err) => {
     const mr = err.matcherResult;
     let messageText;
     try {
-      messageText = typeof mr.message === 'function' ? String(mr.message()) : (typeof mr.message === 'string' ? mr.message : undefined);
+      messageText =
+        typeof mr.message === 'function'
+          ? String(mr.message())
+          : typeof mr.message === 'string'
+            ? mr.message
+            : undefined;
     } catch {}
     out.matcherResult = {
       matcherName: typeof mr.matcherName === 'string' ? mr.matcherName : undefined,
@@ -47,7 +63,9 @@ const sanitizeDetail = (d) => {
   if (d.message) out.message = d.message;
   if (d.stack) out.stack = d.stack;
   if (d.error) out.error = sanitizeError(d.error);
-  if (d.matcherResult) out.matcherResult = sanitizeError({ matcherResult: d.matcherResult }).matcherResult;
+  if (d.matcherResult) {
+    out.matcherResult = sanitizeError({ matcherResult: d.matcherResult }).matcherResult;
+  }
   if (d.expected !== undefined) out.expected = d.expected;
   if (d.received !== undefined) out.received = d.received;
   // Copy the rest
@@ -61,16 +79,28 @@ const sanitizeDetail = (d) => {
 
 class BridgeReporter {
   constructor(globalConfig, options) {
-    this.out = process.env.JEST_BRIDGE_OUT || (options && options.outFile) || path.join(process.cwd(), 'coverage', 'jest-run.json');
+    this.out =
+      process.env.JEST_BRIDGE_OUT ||
+      (options && options.outFile) ||
+      path.join(process.cwd(), 'coverage', 'jest-run.json');
     this.buf = { startTime: Date.now(), testResults: [], aggregated: null };
   }
-  onRunStart() { this.buf.startTime = Date.now(); }
+
+  onRunStart() {
+    this.buf.startTime = Date.now();
+  }
+
   onTestResult(_test, tr) {
     const mapAssertion = (a) => ({
       title: a.title,
       fullName: a.fullName || [...(a.ancestorTitles || []), a.title].join(' '),
       status: a.status,
-      timedOut: Boolean(a.status === 'failed' && String(a.failureMessages || '').toLowerCase().includes('timed out')),
+      timedOut: Boolean(
+        a.status === 'failed' &&
+          String(a.failureMessages || '')
+            .toLowerCase()
+            .includes('timed out'),
+      ),
       duration: a.duration || 0,
       location: a.location || null,
       failureMessages: (a.failureMessages || []).map(String),
@@ -79,7 +109,13 @@ class BridgeReporter {
     this.buf.testResults.push({
       testFilePath: tr.testFilePath,
       status: tr.numFailingTests ? 'failed' : 'passed',
-      timedOut: Boolean((tr.testExecError && /timed out/i.test(String(tr.testExecError && (tr.testExecError.message || tr.testExecError)))) || /timed out/i.test(String(tr.failureMessage || ''))),
+      timedOut: Boolean(
+        (tr.testExecError &&
+          /timed out/i.test(
+            String(tr.testExecError && (tr.testExecError.message || tr.testExecError)),
+          )) ||
+          /timed out/i.test(String(tr.failureMessage || '')),
+      ),
       failureMessage: tr.failureMessage || '',
       failureDetails: (tr.failureDetails || []).map(sanitizeDetail),
       testExecError: tr.testExecError ? sanitizeError(tr.testExecError) : null,
@@ -87,12 +123,30 @@ class BridgeReporter {
       perfStats: tr.perfStats || {},
       testResults: (tr.testResults || []).map(mapAssertion),
     });
+    try {
+      print({
+        type: 'suiteComplete',
+        testPath: tr.testFilePath,
+        numPassingTests: tr.numPassingTests,
+        numFailingTests: tr.numFailingTests,
+      });
+    } catch {}
   }
+
   onRunComplete(_contexts, agg) {
     // Compute timed out counts heuristically from test results & errors
-    const suiteTimedOut = (r) => Boolean((r.testExecError && /timed out/i.test(String(r.testExecError && (r.testExecError.message || r.testExecError)))) || /timed out/i.test(String(r.failureMessage || '')));
+    const suiteTimedOut = (r) =>
+      Boolean(
+        (r.testExecError &&
+          /timed out/i.test(
+            String(r.testExecError && (r.testExecError.message || r.testExecError)),
+          )) ||
+          /timed out/i.test(String(r.failureMessage || '')),
+      );
     const fileTimeouts = this.buf.testResults.filter(suiteTimedOut);
-    const testTimeouts = this.buf.testResults.flatMap((r) => (r.testResults || [])).filter((a) => a && a.timedOut);
+    const testTimeouts = this.buf.testResults
+      .flatMap((r) => r.testResults || [])
+      .filter((a) => a && a.timedOut);
     this.buf.aggregated = {
       numTotalTestSuites: agg.numTotalTestSuites,
       numPassedTestSuites: agg.numPassedTestSuites,
@@ -106,10 +160,14 @@ class BridgeReporter {
       numTimedOutTestSuites: fileTimeouts.length,
       startTime: agg.startTime,
       success: agg.success,
-      runTimeMs: agg.testResults.reduce((t, r) => t + Math.max(0, (r.perfStats?.end || 0) - (r.perfStats?.start || 0)), 0),
+      runTimeMs: agg.testResults.reduce(
+        (t, r) => t + Math.max(0, (r.perfStats?.end || 0) - (r.perfStats?.start || 0)),
+        0,
+      ),
     };
     fs.mkdirSync(path.dirname(this.out), { recursive: true });
     fs.writeFileSync(this.out, JSON.stringify(this.buf), 'utf8');
   }
 }
-module.exports = BridgeReporter;`;
+
+module.exports = BridgeReporter;
