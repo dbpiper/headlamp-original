@@ -42,6 +42,11 @@ import { selectDirectTestsForProduction } from './graph-distance';
 import { computeDirectnessRank, sortTestResultsWithRank } from './relevance';
 import { runParallelStride } from './parallel';
 import { loadHeadlampConfig, type HeadlampConfig } from './config';
+import {
+  isTestLikePathToken,
+  resolveProdSelectionTokens,
+  resolveTestSelectionTokens,
+} from './selection-resolver';
 
 const jestBin = './node_modules/.bin/jest';
 
@@ -674,6 +679,7 @@ export const program = async (): Promise<void> => {
     : selectionPaths;
   const selectionSpecifiedAugmented = Boolean(selectionSpecified || changedSelectionAbs.length > 0);
   const { jest } = argsForDiscovery(['run'], jestArgs);
+
   const selectionLooksLikeTest = selectionPathsAugmented.some(
     (pathText) => /\.(test|spec)\.[tj]sx?$/i.test(pathText) || /(^|\/)tests?\//i.test(pathText),
   );
@@ -682,6 +688,13 @@ export const program = async (): Promise<void> => {
   );
   const selectionHasPaths = selectionPathsAugmented.length > 0;
   const repoRootForDiscovery = workspaceRoot ?? (await findRepoRoot());
+  const selectionTestTokens = (selectionPathsAugmented as readonly string[]).filter(
+    isTestLikePathToken,
+  );
+  const resolvedSelectionTestPaths = await resolveTestSelectionTokens(
+    selectionTestTokens,
+    repoRootForDiscovery,
+  );
   // Detect name-pattern-only selection (no explicit file/path selection or changed files)
   const containsNamePatternForDiscovery = jestArgs.some(
     (arg) => arg === '-t' || arg === '--testNamePattern' || /^--testNamePattern=/.test(String(arg)),
@@ -759,13 +772,14 @@ export const program = async (): Promise<void> => {
   };
 
   const initialProdSelections = selectionPathsAugmented.filter(
-    (pathText) =>
-      (/[\\/]/.test(pathText) || /\.(m?[tj]sx?)$/i.test(pathText)) &&
-      !/(^|\/)tests?\//i.test(pathText) &&
-      !/\.(test|spec)\.[tj]sx?$/i.test(pathText),
+    (pathText) => !isTestLikePathToken(pathText),
   );
-  const expandedProdSelections = initialProdSelections.length
-    ? initialProdSelections
+  const resolvedProdFromTokens = await resolveProdSelectionTokens(
+    initialProdSelections,
+    repoRootForDiscovery,
+  );
+  const expandedProdSelections = resolvedProdFromTokens.length
+    ? resolvedProdFromTokens
     : await expandProductionSelections(selectionPathsAugmented, repoRootForDiscovery);
   const selectionIncludesProdPaths = expandedProdSelections.length > 0;
   console.info(
@@ -915,7 +929,10 @@ export const program = async (): Promise<void> => {
       (pathToken) =>
         /\.(test|spec)\.[tj]sx?$/i.test(pathToken) || /(^|\/)tests?\//i.test(pathToken),
     );
-    const candidates = selectionHasPaths && selectionLooksLikeTest ? selectionTestPaths : files;
+    const selectionTestAbs = resolvedSelectionTestPaths.length
+      ? resolvedSelectionTestPaths
+      : selectionTestPaths;
+    const candidates = selectionHasPaths && selectionLooksLikeTest ? selectionTestAbs : files;
     const absFiles = candidates
       .map((candidatePath) =>
         path.isAbsolute(candidatePath)

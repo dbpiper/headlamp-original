@@ -13,3 +13,4 @@ export * from './lib/formatter/fns';
 export * from './lib/formatter/context';
 export * from './lib/program';
 export * from './lib/path-resolver';
+export * from './lib/selection-resolver';
