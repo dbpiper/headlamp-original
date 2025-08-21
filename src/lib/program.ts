@@ -1361,12 +1361,14 @@ export const program = async (): Promise<void> => {
   console.info(`Discovery → jest: ${jestCount}. ${msg}`);
 
   if (!shouldRunJest) {
-    console.warn('No matching tests were discovered for either Vitest or Jest.');
+    console.info(
+      'No matching tests were discovered for either Vitest or Jest. Treating as success.',
+    );
     console.info(`Jest args: ${[...jestDiscoveryArgs, '--listTests'].join(' ')}`);
     console.info(
       'Tip: check your -t/--testNamePattern and file path; Jest lists files selected by your patterns.',
     );
-    process.exit(1);
+    process.exit(0);
     return;
   }
 
