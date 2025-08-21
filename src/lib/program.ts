@@ -1501,7 +1501,13 @@ export const program = async (): Promise<void> => {
           : 120;
       const clipped = line.length > cols ? `${line.slice(0, Math.max(0, cols - 1))}` : line;
       const pad = Math.max(0, cols - clipped.length - 1);
-      process.stdout.write(`\r${clipped}${' '.repeat(pad)}`);
+      try {
+        // Clear the line, move cursor to start,
+        // and write the new status to avoid side-by-side output
+        process.stdout.write(`\x1b[2K\r${clipped}${' '.repeat(pad)}`);
+      } catch {
+        process.stdout.write(`\r${clipped}${' '.repeat(pad)}`);
+      }
     };
     renderProgress();
     try {
@@ -1543,7 +1549,7 @@ export const program = async (): Promise<void> => {
         `jest-bridge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
       );
       const reporterPath = path.join(os.tmpdir(), 'headlamp', 'reporter.cjs');
-      const envPath = path.join(os.tmpdir(), 'headlamp', 'environment.cjs');
+      const setupPath = path.join(os.tmpdir(), 'headlamp', 'setup.cjs');
       // Resolve package root robustly (works under yalc, workspace, or published)
       const findPackageRoot = (startDir: string): string => {
         let dir = path.resolve(startDir);
@@ -1563,19 +1569,19 @@ export const program = async (): Promise<void> => {
       const packageRoot = findPackageRoot(__dirname);
       const distJestDir = path.resolve(packageRoot, 'dist', 'jest');
       const srcJestDir = path.resolve(packageRoot, 'src', 'jest');
-      const assetEnvPathDist = path.join(distJestDir, 'environment.cjs');
+      const assetSetupPathDist = path.join(distJestDir, 'setup.cjs');
       const assetReporterPathDist = path.join(distJestDir, 'reporter.cjs');
-      const assetEnvPathSrc = path.join(srcJestDir, 'environment.cjs');
+      const assetSetupPathSrc = path.join(srcJestDir, 'setup.cjs');
       const assetReporterPathSrc = path.join(srcJestDir, 'reporter.cjs');
       try {
         // Prefer built assets; fallback to src/jest in dev (yalc/workspace)
         const haveDist =
-          fsSync.existsSync(assetReporterPathDist) && fsSync.existsSync(assetEnvPathDist);
+          fsSync.existsSync(assetReporterPathDist) && fsSync.existsSync(assetSetupPathDist);
         const useReporterSrc = haveDist ? assetReporterPathDist : assetReporterPathSrc;
-        const useEnvSrc = haveDist ? assetEnvPathDist : assetEnvPathSrc;
-        if (!fsSync.existsSync(useReporterSrc) || !fsSync.existsSync(useEnvSrc)) {
+        const useSetupSrc = haveDist ? assetSetupPathDist : assetSetupPathSrc;
+        if (!fsSync.existsSync(useReporterSrc) || !fsSync.existsSync(useSetupSrc)) {
           throw new Error(
-            `Headlamp jest assets not found. Tried:\n  ${assetReporterPathDist}\n  ${assetEnvPathDist}\n  ${assetReporterPathSrc}\n  ${assetEnvPathSrc}\nPlease build the package or ensure src/jest exists.`,
+            `Headlamp jest assets not found. Tried:\n  ${assetReporterPathDist}\n  ${assetSetupPathDist}\n  ${assetReporterPathSrc}\n  ${assetSetupPathSrc}\nPlease build the package or ensure src/jest exists.`,
           );
         }
         const needsWrite = (() => {
@@ -1595,28 +1601,33 @@ export const program = async (): Promise<void> => {
             /* ignore */
           }
         }
-        // ensure environment file exists
+        // ensure setup file exists
         try {
           const outOfDate = (() => {
             try {
-              const existingEnv = fsSync.readFileSync(envPath, 'utf8');
-              const desiredEnv = fsSync.readFileSync(useEnvSrc, 'utf8');
-              return existingEnv !== desiredEnv;
+              const existingSetup = fsSync.readFileSync(setupPath, 'utf8');
+              const desiredSetup = fsSync.readFileSync(useSetupSrc, 'utf8');
+              return existingSetup !== desiredSetup;
             } catch {
               return true;
             }
           })();
           if (outOfDate) {
-            fsSync.copyFileSync(useEnvSrc, envPath);
+            try {
+              fsSync.mkdirSync(path.dirname(setupPath), { recursive: true });
+            } catch {
+              /* ignore mkdir error */
+            }
+            fsSync.copyFileSync(useSetupSrc, setupPath);
           }
         } catch {
           try {
-            fsSync.mkdirSync(path.dirname(envPath), { recursive: true });
+            fsSync.mkdirSync(path.dirname(setupPath), { recursive: true });
           } catch {
             /* ignore mkdir error */
           }
           try {
-            fsSync.copyFileSync(useEnvSrc, envPath);
+            fsSync.copyFileSync(useSetupSrc, setupPath);
           } catch {
             /* ignore */
           }
@@ -1648,8 +1659,6 @@ export const program = async (): Promise<void> => {
         `--reporters=${reporterPath}`,
         '--reporters=default',
         '--colors',
-        '--testEnvironment',
-        envPath,
         ...sanitizedJestRunArgs,
         ...(collectCoverage
           ? [
@@ -1665,23 +1674,33 @@ export const program = async (): Promise<void> => {
       ];
       if (isDebug() || showLogs) {
         const hasSilentFalse = runArgs.includes('--silent=false');
-        const hasEnv = runArgs.includes('--testEnvironment');
         console.info(
-          `debug: showLogs=${String(showLogs)} hasSilentFalse=${String(hasSilentFalse)} hasTestEnvironment=${String(hasEnv)}`,
+          `debug: showLogs=${String(showLogs)} hasSilentFalse=${String(hasSilentFalse)}`,
         );
       }
       let streamBuf = '';
+      const baseEnv = safeEnv(process.env, {
+        NODE_ENV: 'test',
+        JEST_BRIDGE_OUT: outJson,
+        JEST_BRIDGE_DEBUG: showLogs ? '1' : undefined,
+        JEST_BRIDGE_DEBUG_PATH: showLogs
+          ? path.resolve(os.tmpdir(), `jest-bridge-debug-${Date.now()}.log`)
+          : undefined,
+        FORCE_COLOR: '3',
+        TERM: process.env.TERM || 'xterm-256color',
+      }) as unknown as NodeJS.ProcessEnv;
+      const mergedNodeOptions = (() => {
+        try {
+          const existing = String(process.env.NODE_OPTIONS || '').trim();
+          const add = `--require ${setupPath}`;
+          return `${existing ? `${existing} ` : ''}${add}`.trim();
+        } catch {
+          return `--require ${setupPath}`;
+        }
+      })();
+      const envWithSetup = { ...baseEnv, NODE_OPTIONS: mergedNodeOptions } as NodeJS.ProcessEnv;
       const { code, output } = await runWithStreaming(jestBin, runArgs, {
-        env: safeEnv(process.env, {
-          NODE_ENV: 'test',
-          JEST_BRIDGE_OUT: outJson,
-          JEST_BRIDGE_DEBUG: showLogs ? '1' : undefined,
-          JEST_BRIDGE_DEBUG_PATH: showLogs
-            ? path.resolve(os.tmpdir(), `jest-bridge-debug-${Date.now()}.log`)
-            : undefined,
-          FORCE_COLOR: '3',
-          TERM: process.env.TERM || 'xterm-256color',
-        }) as unknown as NodeJS.ProcessEnv,
+        env: envWithSetup,
         onChunk: (text: string) => {
           streamBuf += text;
           const lines = streamBuf.split(/\r?\n/);

@@ -118,6 +118,6 @@ const cliContent = await (await import('node:fs/promises')).readFile(cliPath, 'u
 await writeFile(cliPath, `#!/usr/bin/env node\n${cliContent}`);
 await chmod(cliPath, 0o755);
 
-// Copy Jest runtime assets (env/reporter) to dist so Jest can require them by absolute path
+// Copy Jest runtime assets (reporter/setup) to dist so Jest can require them by absolute path
 await mkdir(resolve(dist, 'jest'), { recursive: true });
 await cp(resolve(src, 'jest'), resolve(dist, 'jest'), { recursive: true });
