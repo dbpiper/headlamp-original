@@ -1,6 +1,7 @@
 /* eslint-disable no-continue */
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import { createHash } from 'node:crypto';
 
@@ -91,7 +92,30 @@ export async function discoverJest(
     ...(hasPatterns ? ((opts!.patterns as readonly string[]) ?? []) : ([] as const)),
   ];
   const jestBin = './node_modules/.bin/jest';
-  const raw = await runText(jestBin, listArgs, {
+  // If a local Jest config file exists, prefer it automatically
+  const withAutoConfig = (args: readonly string[], cwd: string): readonly string[] => {
+    try {
+      const candidates = [
+        'jest.config.cjs',
+        'jest.config.js',
+        'jest.config.mjs',
+        'jest.config.ts',
+        'jest.ts.config.js',
+        'jest.ts.config.cjs',
+      ];
+      for (const name of candidates) {
+        const full = path.join(cwd, name);
+        // eslint-disable-next-line no-sync
+        if (fsSync.existsSync(full) && !args.includes('--config')) {
+          return [...args, '--config', name];
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return args;
+  };
+  const raw = await runText(jestBin, withAutoConfig(listArgs, opts?.cwd ?? process.cwd()), {
     cwd: opts?.cwd ?? process.cwd(),
     env: safeEnv(process.env, {
       CI: '1',
