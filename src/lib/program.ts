@@ -9,6 +9,7 @@ import * as LibReport from 'istanbul-lib-report';
 import * as Reports from 'istanbul-reports';
 import { createCoverageMap } from 'istanbul-lib-coverage';
 
+import { listAllJestConfigs } from './jest-config';
 import { safeEnv } from './env-utils';
 import { runExitCode, runText, runWithStreaming } from './_exec';
 import { deriveArgs } from './args';
@@ -792,19 +793,14 @@ export const program = async (): Promise<void> => {
       ? stripPathTokens(jest)
       : jest;
 
-  const projectConfigs: string[] = [];
-  try {
-    const baseCfg = path.resolve('jest.config.js');
-    const tsCfg = path.resolve('jest.ts.config.js');
-    if (fsSync.existsSync(baseCfg)) {
-      projectConfigs.push(baseCfg);
+  const projectConfigs: string[] = (() => {
+    try {
+      return listAllJestConfigs().map((abs) => path.resolve(abs));
+    } catch (err) {
+      console.warn(`Failed to discover Jest project configs: ${String(err)}`);
+      return [] as string[];
     }
-    if (fsSync.existsSync(tsCfg)) {
-      projectConfigs.push(tsCfg);
-    }
-  } catch (err) {
-    console.warn(`Failed to discover Jest project configs: ${String(err)}`);
-  }
+  })();
 
   const perProjectFiles = new Map<string, string[]>();
   if (!namePatternOnlyForDiscovery && selectionLooksLikeTest && selectionHasPaths) {
