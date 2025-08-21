@@ -1,45 +1,46 @@
-import * as path from "node:path";
+import * as path from 'node:path';
 
-import { safeEnv } from "./env-utils";
-import { runText } from "./_exec";
-import { resolveImportWithRoot } from "./path-resolver";
+import { safeEnv } from './env-utils';
+import { runText } from './_exec';
+import { resolveImportWithRoot } from './path-resolver';
 
-export type ImportSpecExtractor = (
-  absPath: string
-) => Promise<readonly string[]>;
+export type ImportSpecExtractor = (absPath: string) => Promise<readonly string[]>;
 
 // Regex patterns for ripgrep (kept as raw templates to preserve backslashes)
 const RG_IMPORT_FROM = String.raw`import\s+[^'"\n]*from\s+['"]([^'"]+)['"]`;
 const RG_REQUIRE = String.raw`require\(\s*['"]([^'"]+)['"]\s*\)`;
 const RG_EXPORT_FROM = String.raw`export\s+(?:\*|\{[^}]*\})\s*from\s*['"]([^'"]+)['"]`;
+const RG_DYNAMIC_IMPORT = String.raw`import\(\s*['"]([^'"]+)['"]\s*\)`;
 
 export const extractImportSpecs: ImportSpecExtractor = async (absPath) => {
   const args: string[] = [
-    "--pcre2",
-    "--no-filename",
-    "--no-line-number",
-    "--max-columns=200",
-    "--max-columns-preview",
-    "--no-messages",
-    "-o",
-    "--replace",
-    "$1",
-    "-e",
+    '--pcre2',
+    '--no-filename',
+    '--no-line-number',
+    '--max-columns=200',
+    '--max-columns-preview',
+    '--no-messages',
+    '-o',
+    '--replace',
+    '$1',
+    '-e',
     RG_IMPORT_FROM,
-    "-e",
+    '-e',
     RG_REQUIRE,
-    "-e",
+    '-e',
     RG_EXPORT_FROM,
+    '-e',
+    RG_DYNAMIC_IMPORT,
     absPath,
   ];
-  let raw = "";
+  let raw = '';
   try {
-    raw = await runText("rg", args, {
-      env: safeEnv(process.env, { CI: "1" }) as unknown as NodeJS.ProcessEnv,
+    raw = await runText('rg', args, {
+      env: safeEnv(process.env, { CI: '1' }) as unknown as NodeJS.ProcessEnv,
       timeoutMs: 1200,
     });
   } catch {
-    raw = "";
+    raw = '';
   }
   return raw
     .split(/\r?\n/)
@@ -61,13 +62,11 @@ export const selectDirectTestsForProduction = async (opts: {
   const specsCache = new Map<string, readonly string[]>();
   const resolutionCache = new Map<string, string | undefined>();
   const prodSet = new Set(
-    opts.productionFiles.map((prodPath) =>
-      path.resolve(prodPath).replace(/\\/g, "/")
-    )
+    opts.productionFiles.map((prodPath) => path.resolve(prodPath).replace(/\\/g, '/')),
   );
   const out: string[] = [];
   for (const testAbsRaw of opts.testFiles) {
-    const testAbs = path.resolve(testAbsRaw).replace(/\\/g, "/");
+    const testAbs = path.resolve(testAbsRaw).replace(/\\/g, '/');
     let specs: readonly string[] = [];
     const cached = specsCache.get(testAbs);
     if (cached !== undefined) {
@@ -79,12 +78,7 @@ export const selectDirectTestsForProduction = async (opts: {
     }
     let direct = false;
     for (const spec of specs) {
-      const resolved = resolveImportWithRoot(
-        testAbs,
-        spec,
-        opts.rootDir,
-        resolutionCache
-      );
+      const resolved = resolveImportWithRoot(testAbs, spec, opts.rootDir, resolutionCache);
       if (resolved && prodSet.has(resolved)) {
         direct = true;
         break;
