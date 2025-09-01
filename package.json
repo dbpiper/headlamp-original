@@ -35,6 +35,14 @@
   ],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dbpiper/headlamp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dbpiper/headlamp/issues"
+  },
+  "homepage": "https://github.com/dbpiper/headlamp#readme",
   "dependencies": {
     "c12": "^3.2.0",
     "es-toolkit": "^1.7.2",
