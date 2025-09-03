@@ -1372,6 +1372,8 @@ export const program = async (): Promise<void> => {
   let jestExitCode = 0;
   const allBridgeJson: Array<ReturnType<typeof coerceJestJsonToBridge>> = [];
   const executedTestFilesSet = new Set<string>();
+  const coverageFailureLines: string[] = [];
+  let anyTestFailed = false;
   if (shouldRunJest) {
     console.info('Starting Jest (no Vitest targets)…');
     await runJestBootstrap(bootstrapCommand);
@@ -2041,6 +2043,24 @@ export const program = async (): Promise<void> => {
       }
       // Always drop per-project footer; we'll print a unified summary later
       pretty = stripFooter(pretty);
+      // Capture coverage-threshold failure lines from Jest default reporter
+      try {
+        const simpleOut = stripAnsiSimple(output);
+        const lines = simpleOut
+          .split(/\r?\n/)
+          .map((ln) => ln.trim())
+          .filter(Boolean);
+        const matches = lines.filter(
+          (ln) =>
+            /Coverage for (Statements|Branches|Functions|Lines)/i.test(ln) &&
+            /does not meet/i.test(ln),
+        );
+        for (const m of matches) {
+          if (!coverageFailureLines.includes(m)) coverageFailureLines.push(m);
+        }
+      } catch {
+        /* ignore parse failures */
+      }
       if (pretty.trim().length > 0) {
         if (useTty) {
           process.stdout.write('\n');
@@ -2114,6 +2134,7 @@ export const program = async (): Promise<void> => {
       // ignore relevance sorting on failure
     }
     const showStacks = Boolean((unified as any).aggregated?.numFailedTests > 0);
+    anyTestFailed = Number((unified as any).aggregated?.numFailedTests ?? 0) > 0;
     let text = renderVitestFromJestJSON(
       unified as unknown as BridgeJSON,
       makeCtx(
@@ -2135,11 +2156,13 @@ export const program = async (): Promise<void> => {
   }
 
   const finalExitCode = jestExitCode;
-  if (collectCoverage && shouldRunJest && coverageAbortOnFailure && finalExitCode !== 0) {
+  // If tests failed and abortOnFailure is enabled, exit immediately (no coverage print)
+  if (coverageAbortOnFailure && finalExitCode !== 0 && anyTestFailed) {
     process.exit(finalExitCode);
     return;
   }
-  // Only compute and print coverage if we are not aborting after failures
+  // Compute and print coverage when requested. If only coverage thresholds failed,
+  // we still print coverage and also surface the threshold failures clearly.
   if (collectCoverage && shouldRunJest) {
     await mergeLcov();
     const repoRoot = workspaceRoot ?? (await findRepoRoot());
@@ -2161,6 +2184,106 @@ export const program = async (): Promise<void> => {
       executedTests: Array.from(executedTestFilesSet),
     } as const;
     await emitMergedCoverage(coverageUi, mergedOptsBase);
+    // If Jest failed ONLY due to coverage thresholds (no test failures), print a clear error
+    if (finalExitCode !== 0 && !anyTestFailed) {
+      try {
+        const header = `${ansi.red('Coverage thresholds not met')}`;
+        process.stdout.write(`\n${header}\n`);
+
+        // Parse merged coverage summary for actual percentages
+        const summaryTxt = (() => {
+          try {
+            const summaryPath = path.resolve('coverage', 'merged', 'coverage-summary.txt');
+            if (fsSync.existsSync(summaryPath)) return fsSync.readFileSync(summaryPath, 'utf8');
+          } catch {}
+          try {
+            const textPath = path.resolve('coverage', 'merged', 'coverage.txt');
+            if (fsSync.existsSync(textPath)) return fsSync.readFileSync(textPath, 'utf8');
+          } catch {}
+          return '';
+        })();
+        const mergedBody = stripAnsiSimple(summaryTxt);
+        const pctRe = /(Statements|Branches|Functions|Lines)\s*:\s*(\d+(?:\.\d+)?)%/g;
+        const percents = new Map<string, number>();
+        {
+          let m: RegExpExecArray | null;
+          // eslint-disable-next-line no-cond-assign
+          while ((m = pctRe.exec(mergedBody))) {
+            const label = String(m[1]);
+            const pct = Number(m[2]);
+            if (!Number.isNaN(pct)) percents.set(label, pct);
+          }
+        }
+
+        // Parse jest coverageThreshold from the first project config (best-effort)
+        const thresholds = new Map<string, number>();
+        try {
+          const firstCfg =
+            Array.isArray(projectConfigs) && projectConfigs.length ? projectConfigs[0] : undefined;
+          if (firstCfg && fsSync.existsSync(firstCfg)) {
+            const cfgText = fsSync.readFileSync(firstCfg, 'utf8');
+            const blockRe = /coverageThreshold\s*:\s*\{[\s\S]*?global\s*:\s*\{([\s\S]*?)\}/m;
+            const m = blockRe.exec(cfgText);
+            if (m) {
+              const blk = m[1] || '';
+              const pick = (key: string) => {
+                const r = new RegExp(`${key}\\s*:\\s*(\\d+)`, 'i');
+                const mm = r.exec(blk);
+                return mm ? Number(mm[1]) : undefined;
+              };
+              const st = pick('statements');
+              const br = pick('branches');
+              const fn = pick('functions');
+              const ln = pick('lines');
+              if (typeof st === 'number') thresholds.set('Statements', st);
+              if (typeof br === 'number') thresholds.set('Branches', br);
+              if (typeof fn === 'number') thresholds.set('Functions', fn);
+              if (typeof ln === 'number') thresholds.set('Lines', ln);
+            }
+          }
+        } catch {}
+
+        const labels: Array<'Statements' | 'Branches' | 'Functions' | 'Lines'> = [
+          'Statements',
+          'Branches',
+          'Functions',
+          'Lines',
+        ];
+        let printedAny = false;
+        for (const label of labels) {
+          const pct = percents.get(label);
+          const need = thresholds.get(label);
+          if (typeof pct === 'number' && typeof need === 'number') {
+            printedAny = true;
+            if (pct >= need) {
+              process.stdout.write(`${ansi.green(` ${label}: ${pct.toFixed(2)}% ≥ ${need}%`)}\n`);
+            } else {
+              const delta = (need - pct).toFixed(2);
+              process.stdout.write(
+                `${ansi.red(` ${label}: ${pct.toFixed(2)}% < ${need}% (short ${delta}%)`)}\n`,
+              );
+            }
+          }
+        }
+        if (!printedAny) {
+          if (coverageFailureLines.length > 0) {
+            for (const line of coverageFailureLines)
+              process.stdout.write(`${ansi.red(' - ')}${line}\n`);
+          } else {
+            process.stdout.write(
+              `${ansi.red(' - Coverage failed. See tables above and jest coverageThreshold.')}`,
+            );
+            process.stdout.write('\n');
+          }
+        }
+      } catch {
+        /* ignore printing errors */
+      }
+    }
+  }
+  if (coverageAbortOnFailure && finalExitCode !== 0) {
+    process.exit(finalExitCode);
+    return;
   }
   process.exit(finalExitCode);
 };
