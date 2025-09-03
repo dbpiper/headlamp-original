@@ -108,7 +108,13 @@ class BridgeReporter {
     });
     this.buf.testResults.push({
       testFilePath: tr.testFilePath,
-      status: tr.numFailingTests ? 'failed' : 'passed',
+      // Consider suite-level errors as failures even when no individual assertions failed
+      status:
+        (tr && typeof tr.numFailingTests === 'number' && tr.numFailingTests > 0) ||
+        Boolean(tr.testExecError) ||
+        Boolean(tr.failureMessage)
+          ? 'failed'
+          : 'passed',
       timedOut: Boolean(
         (tr.testExecError &&
           /timed out/i.test(
@@ -147,19 +153,33 @@ class BridgeReporter {
     const testTimeouts = this.buf.testResults
       .flatMap((r) => r.testResults || [])
       .filter((a) => a && a.timedOut);
+    // Recompute suite pass/fail counts to include suite-level errors/timeouts
+    const totalSuites = typeof agg.numTotalTestSuites === 'number' ? agg.numTotalTestSuites : 0;
+    const failedSuites = this.buf.testResults.filter(
+      (r) => r.status === 'failed' || r.testExecError || r.failureMessage,
+    ).length;
+    const passedSuites = Math.max(0, totalSuites - failedSuites);
+    const failedAssertions = typeof agg.numFailedTests === 'number' ? agg.numFailedTests : 0;
+    const suiteOnlyFailures = Math.max(0, failedSuites - failedAssertions);
+    const failedTestsInclSuiteErrors = failedAssertions + suiteOnlyFailures;
+
     this.buf.aggregated = {
-      numTotalTestSuites: agg.numTotalTestSuites,
-      numPassedTestSuites: agg.numPassedTestSuites,
-      numFailedTestSuites: agg.numFailedTestSuites,
+      numTotalTestSuites: totalSuites,
+      numPassedTestSuites: passedSuites,
+      numFailedTestSuites: failedSuites,
       numTotalTests: agg.numTotalTests,
       numPassedTests: agg.numPassedTests,
-      numFailedTests: agg.numFailedTests,
+      numFailedTests: failedTestsInclSuiteErrors,
       numPendingTests: agg.numPendingTests,
       numTodoTests: agg.numTodoTests,
       numTimedOutTests: testTimeouts.length,
       numTimedOutTestSuites: fileTimeouts.length,
       startTime: agg.startTime,
-      success: agg.success,
+      success:
+        Boolean(agg.success) &&
+        failedSuites === 0 &&
+        failedTestsInclSuiteErrors === 0 &&
+        fileTimeouts.length === 0,
       runTimeMs: agg.testResults.reduce(
         (t, r) => t + Math.max(0, (r.perfStats?.end || 0) - (r.perfStats?.start || 0)),
         0,

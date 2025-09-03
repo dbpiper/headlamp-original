@@ -1374,6 +1374,7 @@ export const program = async (): Promise<void> => {
   const executedTestFilesSet = new Set<string>();
   const coverageFailureLines: string[] = [];
   let anyTestFailed = false;
+  let anyRuntimeError = false;
   if (shouldRunJest) {
     console.info('Starting Jest (no Vitest targets)…');
     await runJestBootstrap(bootstrapCommand);
@@ -1757,6 +1758,7 @@ export const program = async (): Promise<void> => {
                 ) {
                   const msg = obj && obj.message ? String(obj.message) : 'error';
                   lastEvent = { type: 'error', text: msg.slice(0, 80), at: Date.now() };
+                  anyRuntimeError = true;
                   renderProgress();
                 }
               } catch {
@@ -1826,28 +1828,45 @@ export const program = async (): Promise<void> => {
           if (!namePatternOnlyForDiscovery) {
             return bridgeBase;
           }
-          const keptFiles = bridgeBase.testResults
-            .map((file) => ({
-              ...file,
-              testResults: file.testResults.filter(
-                (t) => t.status === 'passed' || t.status === 'failed',
-              ),
-            }))
-            .filter((file) => file.testResults.length > 0);
+          // Keep files that have real assertions OR suite-level errors
+          const filesWithFlags = bridgeBase.testResults.map((fileRecord) => ({
+            ...fileRecord,
+            testResults: fileRecord.testResults.filter(
+              (assertionResult) =>
+                assertionResult.status === 'passed' || assertionResult.status === 'failed',
+            ),
+            suiteHasFailureFlag: Boolean(
+              (fileRecord as any).failureMessage || (fileRecord as any).testExecError,
+            ),
+          })) as Array<(typeof bridgeBase.testResults)[number] & { suiteHasFailureFlag: boolean }>;
+          const keptFiles = filesWithFlags.filter(
+            (fileRecord) =>
+              fileRecord.testResults.length > 0 || (fileRecord as any).suiteHasFailureFlag,
+          );
           const numFailedTests = keptFiles
-            .flatMap((f) => f.testResults)
-            .filter((t) => t.status === 'failed').length;
+            .flatMap((fileRecord) => fileRecord.testResults)
+            .filter((assertionResult) => assertionResult.status === 'failed').length;
           const numPassedTests = keptFiles
-            .flatMap((f) => f.testResults)
-            .filter((t) => t.status === 'passed').length;
+            .flatMap((fileRecord) => fileRecord.testResults)
+            .filter((assertionResult) => assertionResult.status === 'passed').length;
           const numTotalTests = numFailedTests + numPassedTests;
-          const numFailedSuites = keptFiles.filter((f) =>
-            f.testResults.some((t) => t.status === 'failed'),
+          const numFailedSuites = keptFiles.filter(
+            (fileRecord) =>
+              (fileRecord as any).suiteHasFailureFlag ||
+              fileRecord.testResults.some((assertionResult) => assertionResult.status === 'failed'),
           ).length;
           const numPassedSuites = keptFiles.length - numFailedSuites;
+          const success = numFailedTests === 0 && numFailedSuites === 0;
           return {
             ...bridgeBase,
-            testResults: keptFiles,
+            testResults: keptFiles.map((fileRecord) => {
+              const copy: any = { ...(fileRecord as any) };
+              try {
+                // Remove helper flag from output shape
+                delete copy.suiteHasFailureFlag;
+              } catch {}
+              return copy as typeof fileRecord;
+            }),
             aggregated: {
               ...bridgeBase.aggregated,
               numTotalTestSuites: keptFiles.length,
@@ -1858,7 +1877,7 @@ export const program = async (): Promise<void> => {
               numFailedTests,
               numPendingTests: 0,
               numTodoTests: 0,
-              success: numFailedTests === 0,
+              success,
             },
           } as typeof bridgeBase;
         })();
@@ -2155,7 +2174,9 @@ export const program = async (): Promise<void> => {
     }
   }
 
-  const finalExitCode = jestExitCode;
+  // Prefer Jest's exit code when non-zero; otherwise compute from our aggregated failures
+  const finalExitCode =
+    jestExitCode !== 0 ? jestExitCode : anyTestFailed || anyRuntimeError ? 1 : 0;
   // If tests failed and abortOnFailure is enabled, exit immediately (no coverage print)
   if (coverageAbortOnFailure && finalExitCode !== 0 && anyTestFailed) {
     process.exit(finalExitCode);
