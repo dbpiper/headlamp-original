@@ -395,6 +395,8 @@ export const emitMergedCoverage = async (
         root: repoRoot,
         limitPerFile: limit,
         showCode: opts.coverageShowCode ?? Boolean(process.stdout.isTTY),
+        selectionPaths: opts.selectionPaths ?? [],
+        changedFiles: changedFilesOutput,
       });
     }
   }

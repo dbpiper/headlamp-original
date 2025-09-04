@@ -15,6 +15,12 @@ import {
   missedBranches,
   missedFunctions,
 } from './coverage-core';
+import { resolveProdSelectionTokens } from './selection-resolver';
+import {
+  isConfigLike as isConfigLikeHelper,
+  computeChangeWeights,
+  reorderBySelectionChangeAndConfig,
+} from './coverage-order-helpers';
 
 export const printDetailedCoverage = async (opts: {
   readonly map: import('istanbul-lib-coverage').CoverageMap;
@@ -22,12 +28,23 @@ export const printDetailedCoverage = async (opts: {
   readonly limitPerFile: number | 'all';
   readonly showCode: boolean;
   readonly editorCmd?: string;
+  readonly selectionPaths?: readonly string[];
+  readonly changedFiles?: readonly string[];
 }): Promise<void> => {
-  const files = opts.map.files().sort((fileA, fileB) => {
-    const summaryA = opts.map.fileCoverageFor(fileA).toSummary();
-    const summaryB = opts.map.fileCoverageFor(fileB).toSummary();
-    return summaryA.lines.pct - summaryB.lines.pct;
-  });
+  const selectionAbs = (opts.selectionPaths ?? []).map((p) => path.resolve(p).replace(/\\/g, '/'));
+  const changedAbs = (opts.changedFiles ?? []).map((p) => path.resolve(p).replace(/\\/g, '/'));
+  const weights = await computeChangeWeights(opts.root, changedAbs);
+  const baseFiles = opts.map
+    .files()
+    .map((f) => path.resolve(f).replace(/\\/g, '/'))
+    .filter((abs) => !isTestLikePath(abs) && !isConfigLikeHelper(opts.root, abs));
+  const files = reorderBySelectionChangeAndConfig(
+    opts.root,
+    baseFiles,
+    selectionAbs,
+    changedAbs,
+    weights,
+  );
   for (const abs of files) {
     const fc = opts.map.fileCoverageFor(abs);
     const sum = fc.toSummary();
@@ -137,6 +154,8 @@ export const printCompactCoverage = async (opts: {
     : 6;
   const files = opts.map
     .files()
+    .map((f) => path.resolve(f).replace(/\\/g, '/'))
+    .filter((abs) => !isConfigLikeHelper(opts.root, abs))
     .sort(
       (fileA, fileB) =>
         opts.map.fileCoverageFor(fileA).toSummary().lines.pct -
@@ -855,9 +874,15 @@ export const printPerFileCompositeTables = async (opts: {
   readonly executedTests?: readonly string[];
   readonly editorCmd?: string;
 }): Promise<void> => {
-  const selectionAbs = (opts.selectionPaths ?? []).map((selPath) =>
-    path.resolve(selPath).replace(/\\/g, '/'),
-  );
+  const selectionPathTokens = (opts.selectionPaths ?? [])
+    .map((tok) => String(tok || '').trim())
+    .filter(Boolean);
+  const resolvedSelectionAbs = await resolveProdSelectionTokens(selectionPathTokens, opts.root);
+  const selectionAbs = (
+    resolvedSelectionAbs.length > 0
+      ? resolvedSelectionAbs
+      : selectionPathTokens.map((selPath) => path.resolve(selPath))
+  ).map((absPath) => path.resolve(absPath).replace(/\\/g, '/'));
   const changedAbs = (opts.changedFiles ?? []).map((chgPath) =>
     path.resolve(chgPath).replace(/\\/g, '/'),
   );
@@ -879,12 +904,13 @@ export const printPerFileCompositeTables = async (opts: {
     const unionSize = left.size + right.size - intersectionCount || 1;
     return intersectionCount / unionSize;
   };
+  // use helpers below for config filtering and change weights
   const isSameDirOrChild = (firstAbs: string, secondAbs: string) => {
     const dirA = path.dirname(firstAbs).replace(/\\/g, '/');
     const dirB = path.dirname(secondAbs).replace(/\\/g, '/');
     return dirA === dirB || dirB.startsWith(`${dirA}/`) || dirA.startsWith(`${dirB}/`);
   };
-  const selectionTokens = selectionAbs.map(tokenizeForSimilarity);
+  const selectionSets = selectionAbs.map(tokenizeForSimilarity);
   const changedTokens = changedAbs.map(tokenizeForSimilarity);
   const executedTestsAbs = (opts.executedTests ?? [])
     .map((testPath) => path.resolve(testPath).replace(/\\/g, '/'))
@@ -905,8 +931,10 @@ export const printPerFileCompositeTables = async (opts: {
   } else {
     candidates = uncoveredCandidates;
   }
-  // Always exclude test-like files from candidates
-  candidates = candidates.filter((abs) => !isTestLikePath(abs));
+  // Always exclude test-like files and config-like files from candidates
+  candidates = candidates.filter(
+    (abs) => !isTestLikePath(abs) && !isConfigLikeHelper(opts.root, abs),
+  );
 
   // Compute relevancy of each candidate file to executed tests using import graph distance.
   // Distance tiers: 0=selected file, 1=direct from test, 2+=transitive.
@@ -933,7 +961,7 @@ export const printPerFileCompositeTables = async (opts: {
       const selfTokens = tokenizeForSimilarity(absNorm);
       const selSim = Math.max(
         0,
-        ...selectionTokens.map((selectionTokenSet) => jaccard(selfTokens, selectionTokenSet)),
+        ...selectionSets.map((selectionTokenSet) => jaccard(selfTokens, selectionTokenSet)),
       );
       const chgSim = Math.max(
         0,
@@ -978,14 +1006,12 @@ export const printPerFileCompositeTables = async (opts: {
   const rank = await computeDirectnessRank({ repoRoot: opts.root, productionSeeds: prodSeeds });
   let files = sortPathsWithRank(
     rank,
-    scored.map((s) => s.abs),
+    scored.map((item) => item.abs),
   );
-  // Move directly selected production files to the very top (if present)
-  if (selectionAbs.length > 0) {
-    const selectionSet = new Set(selectionAbs);
-    const selectedHead = files.filter((filePath) => selectionSet.has(filePath));
-    const nonSelected = files.filter((filePath) => !selectionSet.has(filePath));
-    files = [...selectedHead, ...nonSelected];
+  // Re-rank head by explicit selection and degree of change; deprioritize config files
+  {
+    const weights = await computeChangeWeights(opts.root, changedAbs);
+    files = reorderBySelectionChangeAndConfig(opts.root, files, selectionAbs, changedAbs, weights);
   }
   const rowsAvail =
     typeof process.stdout.rows === 'number' && process.stdout.rows > 10 ? process.stdout.rows : 40;
