@@ -66,7 +66,9 @@ type AugmentHttpArgs = Readonly<{
   readonly excludeGlobs: ReadonlyArray<string>;
 }>;
 
-const augmentWithHttpRouteTests = async (args: AugmentHttpArgs): Promise<ReadonlyArray<string>> => {
+export const augmentWithHttpRouteTests = async (
+  args: AugmentHttpArgs,
+): Promise<ReadonlyArray<string>> => {
   if (args.productionSeeds.length === 0) {
     return args.related;
   }
