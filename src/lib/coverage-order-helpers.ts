@@ -1,7 +1,6 @@
 import * as path from 'node:path';
 
-import { safeEnv } from './env-utils';
-import { runText } from './_exec';
+import { getChangeStats } from './git-utils';
 
 export const isConfigLike = (repoRoot: string, absPath: string): boolean => {
   const rel = path.relative(repoRoot, absPath).replace(/\\/g, '/');
@@ -24,12 +23,8 @@ export const computeChangeWeights = async (
     .map((abs) => path.relative(repoRoot, abs).replace(/\\/g, '/'))
     .filter((rel) => rel && !rel.startsWith('./'));
   try {
-    const args = ['diff', '--numstat', '--', ...rels];
-    const out = await runText('git', args, {
-      env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
-    });
-    out
-      .split(/\r?\n/)
+    const lines = await getChangeStats(rels, { cwd: repoRoot });
+    lines
       .map((ln) => ln.trim())
       .filter(Boolean)
       .forEach((line) => {
@@ -75,5 +70,5 @@ export const reorderBySelectionChangeAndConfig = (
   const nonChanged = restAfterSel.filter((filePath) => !changedSet.has(filePath));
   const nonCfg = nonChanged.filter((filePath) => !isConfigLike(repoRoot, filePath));
   const cfg = nonChanged.filter((filePath) => isConfigLike(repoRoot, filePath));
-  return [...selectedNonCfg, ...selectedCfg, ...changedOnly, ...nonCfg, ...cfg];
+  return [...cfg, ...selectedCfg, ...nonCfg, ...changedOnly, ...selectedNonCfg];
 };

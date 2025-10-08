@@ -2,6 +2,8 @@ import * as path from 'node:path';
 
 import { DEFAULT_EXCLUDE } from './args';
 import { cachedRelated, findRelatedTestsFast, DEFAULT_TEST_GLOBS } from './fast-related';
+import { discoverTestsForHttpPaths, getRouteIndex } from './routeGraph';
+import { pipe } from './fp';
 
 export type TestFileResultLike = Readonly<{
   testFilePath: string;
@@ -57,6 +59,49 @@ export const comparatorForRank = (
   );
 };
 
+type AugmentHttpArgs = Readonly<{
+  readonly repoRoot: string;
+  readonly productionSeeds: ReadonlyArray<string>;
+  readonly related: ReadonlyArray<string>;
+  readonly excludeGlobs: ReadonlyArray<string>;
+}>;
+
+const augmentWithHttpRouteTests = async (args: AugmentHttpArgs): Promise<ReadonlyArray<string>> => {
+  if (args.productionSeeds.length === 0) {
+    return args.related;
+  }
+  try {
+    const index = await getRouteIndex(args.repoRoot);
+    const httpPaths = pipe(
+      args.productionSeeds,
+      (seeds) =>
+        seeds
+          .flatMap((seed) => index.httpRoutesForSource(seed))
+          .filter((pathText) => pathText.length > 0),
+      (paths) => Array.from(new Set(paths)),
+    );
+    if (httpPaths.length === 0) {
+      return args.related;
+    }
+    const routeTests = await discoverTestsForHttpPaths(args.repoRoot, httpPaths, args.excludeGlobs);
+    if (routeTests.length === 0) {
+      return args.related;
+    }
+    const existing = new Set(args.related.map((candidate) => normalizeAbs(candidate)));
+    const additions = pipe(
+      routeTests,
+      (tests) => tests.map((candidate) => normalizeAbs(candidate)),
+      (tests) => tests.filter((candidate) => !existing.has(candidate)),
+    );
+    if (additions.length === 0) {
+      return args.related;
+    }
+    return [...args.related, ...additions];
+  } catch {
+    return args.related;
+  }
+};
+
 export type DirectnessRankOptions = Readonly<{
   repoRoot: string;
   productionSeeds: ReadonlyArray<string>;
@@ -76,14 +121,20 @@ export const computeDirectnessRank = async (
     compute: () =>
       findRelatedTestsFast({
         repoRoot: opts.repoRoot,
-        productionPaths: opts.productionSeeds,
+        seeds: opts.productionSeeds,
         testGlobs: DEFAULT_TEST_GLOBS,
         excludeGlobs: opts.excludeGlobs ?? DEFAULT_EXCLUDE,
         timeoutMs: 1500,
       }),
   });
+  const augmented = await augmentWithHttpRouteTests({
+    repoRoot: opts.repoRoot,
+    productionSeeds: opts.productionSeeds,
+    excludeGlobs: opts.excludeGlobs ?? DEFAULT_EXCLUDE,
+    related,
+  });
   const out = new Map<string, number>();
-  related.forEach((abs, index) => {
+  augmented.forEach((abs, index) => {
     out.set(normalizeAbs(abs), index);
   });
   return out;
@@ -111,3 +162,23 @@ export const sortPathsWithRank = (
   rankByPath: ReadonlyMap<string, number>,
   paths: ReadonlyArray<string>,
 ): string[] => paths.slice().sort(comparatorForPathRank(rankByPath));
+
+export const augmentRankWithPriorityPaths = (
+  rankByPath: ReadonlyMap<string, number>,
+  priorityPaths: ReadonlyArray<string>,
+): ReadonlyMap<string, number> => {
+  if (priorityPaths.length === 0) {
+    return rankByPath;
+  }
+  const base = new Map(rankByPath);
+  const total = priorityPaths.length;
+  priorityPaths
+    .map((abs) => normalizeAbs(abs))
+    .forEach((abs, index) => {
+      const priority = -(total - index);
+      const existing = base.get(abs);
+      const next = existing !== undefined ? Math.min(existing, priority) : priority;
+      base.set(abs, next);
+    });
+  return base;
+};

@@ -1,8 +1,7 @@
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
 
-import { safeEnv } from './env-utils';
-import { runText } from './_exec';
+import { ripgrepFiles } from './ripgrep-utils';
 
 const toAbsPosix = (absPath: string): string => path.resolve(absPath).replace(/\\/g, '/');
 const existsFile = (absPath: string): boolean => {
@@ -64,16 +63,8 @@ const resolveTokens = async (
     }
     const token = tokenRaw.startsWith('/') ? tokenRaw.slice(1) : tokenRaw;
     const trySearch = async (patterns: readonly string[]): Promise<void> => {
-      const args: string[] = ['--files'];
-      for (const pat of patterns) {
-        args.push('-g', pat);
-      }
-      for (const g of excludeGlobs) {
-        args.push('-g', g);
-      }
-      const out = await runText('rg', args, {
+      const out = await ripgrepFiles(patterns, excludeGlobs, {
         cwd: repoRoot,
-        env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
         timeoutMs: 4000,
       });
       out

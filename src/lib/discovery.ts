@@ -10,6 +10,7 @@ import { runText } from './_exec';
 import { DEFAULT_EXCLUDE } from './args';
 import { cachedRelated, findRelatedTestsFast, DEFAULT_TEST_GLOBS } from './fast-related';
 import { selectDirectTestsForProduction } from './graph-distance';
+import { getShortCommitHash, getGitStatus } from './git-utils';
 
 export async function findRepoRoot(): Promise<string> {
   let workingDirectory = process.cwd();
@@ -142,7 +143,7 @@ export const discoverJestResilient = async (
       compute: () =>
         findRelatedTestsFast({
           repoRoot,
-          productionPaths: related,
+          seeds: related,
           testGlobs: DEFAULT_TEST_GLOBS,
           excludeGlobs: DEFAULT_EXCLUDE,
           timeoutMs: 1500,
@@ -214,16 +215,28 @@ export const discoverJestCached = async (
   const repoKey = createHash('sha1').update(path.resolve(cwd)).digest('hex').slice(0, 12);
   const cacheDir = path.join(cacheRoot, repoKey);
   const cacheFile = path.join(cacheDir, 'jest-list.json');
-  let head = 'nogit';
+  const head = await getShortCommitHash({ cwd });
+
+  // Include git status in cache key to detect untracked test files
+  let statusHash = '';
   try {
-    const raw = await runText('git', ['-C', cwd, 'rev-parse', '--short', 'HEAD'], {
-      env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
-    });
-    head = raw.trim() || 'nogit';
+    const statusRaw = await getGitStatus({ cwd });
+    const testFiles = statusRaw
+      .split(/\r?\n/)
+      .filter((line) => {
+        const trimmed = line.trim();
+        return trimmed && (/\.(test|spec)\.[tj]sx?$/i.test(trimmed) || /tests?\//i.test(trimmed));
+      })
+      .sort()
+      .join('\n');
+    if (testFiles) {
+      statusHash = `:${createHash('sha1').update(testFiles).digest('hex').slice(0, 8)}`;
+    }
   } catch {
-    head = 'nogit';
+    /* ignore git status errors */
   }
-  const key = `${head}::${cwd}::${jestArgs.join(' ')}`;
+
+  const key = `${head}${statusHash}::${cwd}::${jestArgs.join(' ')}`;
   let bag: Record<string, string[]> = {};
   try {
     const txt = await fs.readFile(cacheFile, 'utf8');

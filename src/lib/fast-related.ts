@@ -4,8 +4,8 @@ import * as os from 'node:os';
 import * as fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 
-import { safeEnv } from './env-utils';
-import { runText } from './_exec';
+import { ripgrepSearch, isRipgrepAvailable } from './ripgrep-utils';
+import { getShortCommitHash } from './git-utils';
 
 const TailSegmentCount = 2 as const;
 const EmptyCount = 0 as const;
@@ -18,7 +18,7 @@ export const DEFAULT_TEST_GLOBS = [
 
 export type FindRelatedOpts = {
   readonly repoRoot: string;
-  readonly productionPaths: readonly string[];
+  readonly seeds: ReadonlyArray<string>;
   readonly testGlobs?: readonly string[];
   readonly excludeGlobs?: readonly string[];
   readonly timeoutMs?: number;
@@ -46,34 +46,25 @@ export const findRelatedTestsFast = async (opts: FindRelatedOpts): Promise<reado
   };
 
   const seeds = Array.from(
-    new Set(
-      opts.productionPaths.map((productionPath) => path.resolve(productionPath)).flatMap(toSeeds),
-    ),
+    new Set(opts.seeds.flatMap((candidate) => toSeeds(path.resolve(candidate)))),
   );
   if (seeds.length === EmptyCount) {
     return [] as string[];
   }
 
-  try {
-    const rgVersion = await runText('rg', ['--version'], {
-      env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
-    });
-    if (!rgVersion) {
-      return [] as string[];
-    }
-  } catch {
+  const rgAvailable = await isRipgrepAvailable();
+  if (!rgAvailable) {
     return [] as string[];
   }
 
-  const args: string[] = ['-n', '-l', '-S', '-F'];
-  testGlobs.forEach((globPattern) => args.push('-g', globPattern));
-  excludeGlobs.forEach((excludeGlobPattern) => args.push('-g', `!${excludeGlobPattern}`));
-  seeds.forEach((seedToken) => args.push('-e', seedToken));
-
   let raw = '';
   try {
-    raw = await runText('rg', [...args, repoRoot], {
-      env: safeEnv(process.env, { CI: '1' }) as unknown as NodeJS.ProcessEnv,
+    raw = await ripgrepSearch(seeds, testGlobs, excludeGlobs, repoRoot, {
+      lineNumbers: true,
+      filesWithMatches: true,
+      smartCase: true,
+      fixedStrings: true,
+      env: { CI: '1' },
     });
   } catch {
     raw = '';
@@ -116,15 +107,7 @@ export const cachedRelated = async (opts: {
   const cacheDir = path.join(cacheRoot, repoKey);
   const cacheFile = path.join(cacheDir, 'relevant-tests.json');
 
-  let head = 'nogit';
-  try {
-    const raw = await runText('git', ['-C', opts.repoRoot, 'rev-parse', '--short', 'HEAD'], {
-      env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
-    });
-    head = raw.trim() || 'nogit';
-  } catch {
-    head = 'nogit';
-  }
+  const head = await getShortCommitHash({ cwd: opts.repoRoot });
 
   const key = `${head}::${opts.selectionKey}`;
 

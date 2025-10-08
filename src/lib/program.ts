@@ -12,7 +12,17 @@ import { createCoverageMap } from 'istanbul-lib-coverage';
 import { listAllJestConfigs } from './jest-config';
 import { safeEnv } from './env-utils';
 import { runExitCode, runText, runWithStreaming } from './_exec';
+import { ripgrepFiles } from './ripgrep-utils';
 import { deriveArgs } from './args';
+import {
+  getChangedFilesSinceHead,
+  getDefaultBranch,
+  getMergeBase,
+  getDiffBetweenCommits,
+  getStagedFiles,
+  getUnstagedFiles,
+  getUntrackedFiles,
+} from './git-utils';
 import {
   findRepoRoot,
   argsForDiscovery,
@@ -40,7 +50,12 @@ import { tintPct, barNeutral } from './bars';
 import { ansi } from './ansi';
 import { Colors } from './colors';
 import { selectDirectTestsForProduction } from './graph-distance';
-import { computeDirectnessRank, sortTestResultsWithRank } from './relevance';
+import {
+  computeDirectnessRank,
+  sortTestResultsWithRank,
+  augmentRankWithPriorityPaths,
+  augmentWithHttpRouteTests,
+} from './relevance';
 import { runParallelStride } from './parallel';
 import { loadHeadlampConfig, type HeadlampConfig } from './config';
 import {
@@ -237,14 +252,9 @@ export const emitMergedCoverage = async (
   let changedFilesOutput: readonly string[] = [];
 
   try {
-    const out = await runText('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB', 'HEAD'], {
-      env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
-    });
-    changedFilesOutput = out
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((filePathText) => filePathText.replace(/\\/g, '/'));
+    changedFilesOutput = (await getChangedFilesSinceHead()).map((filePathText) =>
+      filePathText.replace(/\\/g, '/'),
+    );
   } catch (gitError) {
     console.warn(`git diff failed when deriving changed files: ${String(gitError)}`);
   }
@@ -574,81 +584,25 @@ export const program = async (): Promise<void> => {
     mode: 'all' | 'staged' | 'unstaged' | 'branch' | 'lastCommit',
     cwd: string,
   ): Promise<readonly string[]> => {
-    const collect = async (cmd: string, args: readonly string[]) => {
-      try {
-        const out = await runText(cmd, args, {
-          cwd,
-          env: safeEnv(process.env, {}) as unknown as NodeJS.ProcessEnv,
-          timeoutMs: 4000,
-        });
-        return out
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean);
-      } catch {
-        return [] as string[];
-      }
-    };
+    const gitOpts = { cwd, timeoutMs: 4000 };
     if (mode === 'lastCommit') {
-      const lastDiff = await collect('git', [
-        'diff',
-        '--name-only',
-        '--diff-filter=ACMRTUXB',
-        'HEAD^',
-        'HEAD',
-      ]);
+      const lastDiff = await getDiffBetweenCommits('HEAD^', 'HEAD', gitOpts);
       const rels = Array.from(new Set(lastDiff));
       return rels
         .map((rel) => path.resolve(cwd, rel).replace(/\\/g, '/'))
         .filter((abs) => !abs.includes('/node_modules/') && !abs.includes('/coverage/'));
     }
     if (mode === 'branch') {
-      // Determine default branch (origin/HEAD -> ref or fall back to origin/main, origin/master)
-      const resolveDefaultBranch = async (): Promise<string | undefined> => {
-        const candidates: string[] = [];
-        try {
-          const sym = await collect('git', ['symbolic-ref', 'refs/remotes/origin/HEAD']);
-          const headRef = sym.find((ln) => ln.includes('refs/remotes/origin/'));
-          if (headRef) {
-            const m = /refs\/remotes\/(.+)/.exec(headRef);
-            if (m && m[1]) {
-              candidates.push(m[1]);
-            }
-          }
-        } catch {
-          /* ignore */
-        }
-        candidates.push('origin/main', 'origin/master');
-        for (const cand of candidates) {
-          // eslint-disable-next-line no-await-in-loop
-          const exists = await collect('git', ['rev-parse', '--verify', cand]);
-          if (exists.length > 0) {
-            return cand;
-          }
-        }
-        return undefined;
-      };
-      const defaultBranch = await resolveDefaultBranch();
+      const defaultBranch = await getDefaultBranch(gitOpts);
       const mergeBase = defaultBranch
-        ? (await collect('git', ['merge-base', 'HEAD', defaultBranch]))[0]
+        ? await getMergeBase('HEAD', defaultBranch, gitOpts)
         : undefined;
       const diffBase = mergeBase ?? 'HEAD^';
-      const branchDiff = await collect('git', [
-        'diff',
-        '--name-only',
-        '--diff-filter=ACMRTUXB',
-        diffBase,
-        'HEAD',
-      ]);
+      const branchDiff = await getDiffBetweenCommits(diffBase, 'HEAD', gitOpts);
       // On top of branch diff, include current uncommitted (staged/unstaged) and untracked changes
-      const stagedNow = await collect('git', [
-        'diff',
-        '--name-only',
-        '--diff-filter=ACMRTUXB',
-        '--cached',
-      ]);
-      const unstagedNow = await collect('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB']);
-      const untrackedNow = await collect('git', ['ls-files', '--others', '--exclude-standard']);
+      const stagedNow = await getStagedFiles(gitOpts);
+      const unstagedNow = await getUnstagedFiles(gitOpts);
+      const untrackedNow = await getUntrackedFiles(gitOpts);
       const rels = Array.from(
         new Set([...branchDiff, ...stagedNow, ...unstagedNow, ...untrackedNow]),
       );
@@ -656,18 +610,10 @@ export const program = async (): Promise<void> => {
         .map((rel) => path.resolve(cwd, rel).replace(/\\/g, '/'))
         .filter((abs) => !abs.includes('/node_modules/') && !abs.includes('/coverage/'));
     }
-    const staged =
-      mode === 'staged' || mode === 'all'
-        ? await collect('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB', '--cached'])
-        : [];
+    const staged = mode === 'staged' || mode === 'all' ? await getStagedFiles(gitOpts) : [];
     const unstagedTracked =
-      mode === 'unstaged' || mode === 'all'
-        ? await collect('git', ['diff', '--name-only', '--diff-filter=ACMRTUXB'])
-        : [];
-    const untracked =
-      mode === 'unstaged' || mode === 'all'
-        ? await collect('git', ['ls-files', '--others', '--exclude-standard'])
-        : [];
+      mode === 'unstaged' || mode === 'all' ? await getUnstagedFiles(gitOpts) : [];
+    const untracked = mode === 'unstaged' || mode === 'all' ? await getUntrackedFiles(gitOpts) : [];
     const rels = Array.from(new Set([...staged, ...unstagedTracked, ...untracked]));
     return rels
       .map((rel) => path.resolve(cwd, rel).replace(/\\/g, '/'))
@@ -747,11 +693,9 @@ export const program = async (): Promise<void> => {
       // Use ripgrep to find files whose path ends with the token (filename or suffix)
       try {
         // eslint-disable-next-line no-await-in-loop
-        const out = await runText('rg', ['--files', '-g', `**/${token}`], {
+        const out = await ripgrepFiles([`**/${token}`], [], {
           cwd: repoRoot,
-          env: safeEnv(process.env, {
-            CI: '1',
-          }) as unknown as NodeJS.ProcessEnv,
+          env: { CI: '1' },
           timeoutMs: 4000,
         });
         const matches = out
@@ -995,19 +939,26 @@ export const program = async (): Promise<void> => {
       compute: () =>
         findRelatedTestsFast({
           repoRoot: repoRootForRefinement,
-          productionPaths: prodSelections,
+          seeds: prodSelections,
           testGlobs: DEFAULT_TEST_GLOBS,
           excludeGlobs: DEFAULT_EXCLUDE,
           timeoutMs: 1500,
         }),
     });
+    const httpAugmented = await augmentWithHttpRouteTests({
+      repoRoot: repoRootForRefinement,
+      productionSeeds: prodSelections,
+      related: rgMatches,
+      excludeGlobs: DEFAULT_EXCLUDE,
+    });
     console.info(`rg candidates → count=${rgMatches.length}`);
+    console.info(`http augmented candidates → count=${httpAugmented.length}`);
     console.info('rg candidates →');
-    const normalizedCandidates = rgMatches.map((candidatePath) =>
+    const normalizedCandidates = httpAugmented.map((candidatePath) =>
       candidatePath.replace(/\\/g, '/'),
     );
     normalizedCandidates.forEach((candidatePath) => console.info(` - ${candidatePath}`));
-    const rgSet = new Set(rgMatches.map((candidate) => candidate.replace(/\\/g, '/')));
+    const rgSet = new Set(httpAugmented.map((candidate) => candidate.replace(/\\/g, '/')));
     if (rgSet.size > 0) {
       if (selectionIncludesProdPaths) {
         // Overwrite jestFiles with rg candidates and re-filter per project ownership
@@ -1038,10 +989,13 @@ export const program = async (): Promise<void> => {
           const toSeeds = (abs: string) => {
             const rel = path.relative(repoRootForScan, abs).replace(/\\/g, '/');
             const withoutExt = rel.replace(/\.(m?[tj]sx?)$/i, '');
-            const base = path.basename(withoutExt);
-            const segs = withoutExt.split('/');
-            const tail2 = segs.slice(-2).join('/');
-            return Array.from(new Set([withoutExt, base, tail2].filter(Boolean)));
+            const segments = withoutExt.split('/');
+            return segments
+              .flatMap((_, index) => {
+                const slice = segments.slice(0, index + 1).join('/');
+                return slice ? [slice] : [];
+              })
+              .concat(withoutExt);
           };
           const seeds = Array.from(new Set(prodSelections.flatMap(toSeeds)));
           const includesSeed = (text: string) => seeds.some((seed) => text.includes(seed));
@@ -1374,6 +1328,9 @@ export const program = async (): Promise<void> => {
   let jestExitCode = 0;
   const allBridgeJson: Array<ReturnType<typeof coerceJestJsonToBridge>> = [];
   const executedTestFilesSet = new Set<string>();
+  const selectedTestFileSet = new Set(
+    resolvedSelectionTestPaths.map((absPath) => path.resolve(absPath).replace(/\\/g, '/')),
+  );
   const coverageFailureLines: string[] = [];
   let anyTestFailed = false;
   let anyRuntimeError = false;
@@ -1418,10 +1375,12 @@ export const program = async (): Promise<void> => {
       );
     })();
     const repoRootForRank = repoRootForDiscovery;
-    const fileRank = await computeDirectnessRank({
+    const resolvedPrioritySet = new Set(selectedTestFileSet);
+    const fileRankBase = await computeDirectnessRank({
       repoRoot: repoRootForRank,
       productionSeeds: prodSeedsForRun,
     });
+    const fileRank = augmentRankWithPriorityPaths(fileRankBase, Array.from(resolvedPrioritySet));
 
     // live progress (TTY only): suites across all projects
     const useTty = Boolean(process.stdout.isTTY);
@@ -2148,7 +2107,11 @@ export const program = async (): Promise<void> => {
         repoRoot: repoRootForDiscovery,
         productionSeeds: prodSeeds,
       });
-      const ordered = sortTestResultsWithRank(unifiedRank, unified.testResults).reverse();
+      const priorityForUnified = augmentRankWithPriorityPaths(
+        unifiedRank,
+        Array.from(selectedTestFileSet),
+      );
+      const ordered = sortTestResultsWithRank(priorityForUnified, unified.testResults).reverse();
       // eslint-disable-next-line no-param-reassign
       (unified as any).testResults = ordered;
     } catch {
