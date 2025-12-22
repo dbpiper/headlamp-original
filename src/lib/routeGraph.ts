@@ -179,6 +179,37 @@ const collectBaseIdentifiers = (expr: ts.Expression): ReadonlyArray<string> => {
   return [];
 };
 
+const extractInlineRequireDescriptors = (expr: ts.Expression): ReadonlyArray<ImportDescriptor> => {
+  if (
+    ts.isCallExpression(expr) &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === 'require' &&
+    expr.arguments.length > 0
+  ) {
+    const spec = readStringLiteralText(expr.arguments[0]);
+    if (!spec) {
+      return [];
+    }
+    const local = `__hl_inline_require_${spec}`;
+    return [{ local, specifier: spec }];
+  }
+  if (ts.isPropertyAccessExpression(expr)) {
+    return extractInlineRequireDescriptors(expr.expression);
+  }
+  if (ts.isElementAccessExpression(expr)) {
+    return extractInlineRequireDescriptors(expr.expression);
+  }
+  if (ts.isParenthesizedExpression(expr)) {
+    return extractInlineRequireDescriptors(expr.expression);
+  }
+  if (ts.isArrayLiteralExpression(expr)) {
+    return pipe(expr.elements, (elements) =>
+      elements.flatMap((el) => extractInlineRequireDescriptors(el as ts.Expression)),
+    );
+  }
+  return [];
+};
+
 const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
   const sourceText = await fs.readFile(filePath, 'utf8');
   const source = ts.createSourceFile(
@@ -313,8 +344,20 @@ const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
           const identifiers = pipe(argsForTargets, (args) =>
             args.flatMap((arg) => collectBaseIdentifiers(arg)),
           );
+          const inlineRequires = pipe(argsForTargets, (args) =>
+            args.flatMap((arg) => extractInlineRequireDescriptors(arg)),
+          );
+          inlineRequires.forEach((desc) => requireDescriptors.push(desc));
+          const inlineTargets = inlineRequires.map((d) => d.local);
           upsertContainerRoute(containerRoutes, container, (existing) => ({
-            uses: [...existing.uses, { path: pathLiteral, targets: identifiers, container }],
+            uses: [
+              ...existing.uses,
+              {
+                path: pathLiteral,
+                targets: [...identifiers, ...inlineTargets],
+                container,
+              },
+            ],
             handlers: existing.handlers,
           }));
         } else if (RouterMethodLookup.has(method)) {
