@@ -93,7 +93,10 @@ export const findRelatedTestsFast = async (opts: FindRelatedOpts): Promise<reado
       }
     }),
   );
-  return checks.filter((p): p is string => typeof p === 'string');
+  return checks
+    .filter((p): p is string => typeof p === 'string')
+    .slice()
+    .sort((a, b) => a.localeCompare(b));
 };
 
 export const cachedRelated = async (opts: {
