@@ -306,13 +306,11 @@ const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
           ts.forEachChild(node, visit);
           return;
         }
-        if (!firstArg || !ts.isStringLiteral(firstArg)) {
-          ts.forEachChild(node, visit);
-          return;
-        }
-        const pathLiteral = firstArg.text;
         if (method === 'use') {
-          const identifiers = pipe(node.arguments.slice(1), (args) =>
+          const hasBasePath = Boolean(firstArg && ts.isStringLiteral(firstArg));
+          const pathLiteral = hasBasePath ? (firstArg as ts.StringLiteral).text : '/';
+          const argsForTargets = hasBasePath ? node.arguments.slice(1) : node.arguments;
+          const identifiers = pipe(argsForTargets, (args) =>
             args.flatMap((arg) => collectBaseIdentifiers(arg)),
           );
           upsertContainerRoute(containerRoutes, container, (existing) => ({
@@ -320,6 +318,11 @@ const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
             handlers: existing.handlers,
           }));
         } else if (RouterMethodLookup.has(method)) {
+          if (!firstArg || !ts.isStringLiteral(firstArg)) {
+            ts.forEachChild(node, visit);
+            return;
+          }
+          const pathLiteral = firstArg.text;
           const restArgs = node.arguments.slice(1);
           const identifiers = pipe(restArgs, (args) =>
             args.flatMap((arg) => collectBaseIdentifiers(arg)),
