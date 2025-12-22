@@ -27,6 +27,15 @@ type ImportDescriptor = Readonly<{
   readonly specifier: string;
 }>;
 
+const readStringLiteralText = (expr: ts.Expression | undefined): string | undefined =>
+  expr && ts.isStringLiteral(expr) ? expr.text : undefined;
+
+const readIdentifierText = (id: ts.Identifier | undefined): string | undefined =>
+  id ? String(id.escapedText) : undefined;
+
+const readModuleExportNameText = (name: ts.ModuleExportName | undefined): string | undefined =>
+  !name ? undefined : ts.isIdentifier(name) ? String(name.escapedText) : name.text;
+
 type ContainerRoutes = Readonly<{
   readonly uses: ReadonlyArray<RouteUse>;
   readonly handlers: ReadonlyArray<RouteHandler>;
@@ -234,11 +243,11 @@ const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
       node.initializer.arguments.length > 0 &&
       ts.isStringLiteral(node.initializer.arguments[0])
     ) {
-      const localName = ts.isIdentifier(node.name) ? node.name.text : undefined;
+      const localName = ts.isIdentifier(node.name) ? readIdentifierText(node.name) : undefined;
       if (localName) {
         requireDescriptors.push({
           local: localName,
-          specifier: node.initializer.arguments[0]!.text,
+          specifier: readStringLiteralText(node.initializer.arguments[0]) ?? '',
         });
       }
     }
@@ -251,18 +260,27 @@ const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
       const clause = node.importClause;
       if (clause) {
         if (clause.name) {
-          importDescriptors.push({ local: clause.name.text, specifier: node.moduleSpecifier.text });
+          importDescriptors.push({
+            local: readIdentifierText(clause.name) ?? '',
+            specifier: readStringLiteralText(node.moduleSpecifier) ?? '',
+          });
         }
         if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
           clause.namedBindings.elements.forEach((element) => {
-            const localName = element.propertyName?.text ?? element.name.text;
-            importDescriptors.push({ local: localName, specifier: node.moduleSpecifier.text });
+            const localName =
+              readModuleExportNameText(element.propertyName) ??
+              readIdentifierText(element.name) ??
+              '';
+            importDescriptors.push({
+              local: localName,
+              specifier: readStringLiteralText(node.moduleSpecifier) ?? '',
+            });
           });
         }
         if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
           importDescriptors.push({
-            local: clause.namedBindings.name.text,
-            specifier: node.moduleSpecifier.text,
+            local: readIdentifierText(clause.namedBindings.name) ?? '',
+            specifier: readStringLiteralText(node.moduleSpecifier) ?? '',
           });
         }
       }
@@ -564,7 +582,7 @@ const buildRouteIndexInternal = async (repoRoot: string): Promise<RouteIndex> =>
         collectRouteHandlers(trie, segments, method),
       );
       return matches.length > 0
-        ? Array.from(new Set(matches.map((candidate) => normalizeFsPath(candidate))))
+        ? Array.from(new Set(matches.flatMap((sources) => sources.map((p) => normalizeFsPath(p)))))
         : [];
     },
     httpRoutesForSource: (sourcePath: string) => {

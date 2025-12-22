@@ -915,7 +915,6 @@ export const buildThrownSection = (details: readonly unknown[]): string[] => {
         candidates.push('cause:');
         candidates.push(...toLines(err.cause));
       }
-      c;
       const rest = { ...err };
       delete (rest as any).name;
       delete (rest as any).message;

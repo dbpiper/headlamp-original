@@ -6,4 +6,4 @@ export {
   parseMethodPathFromTitle,
   routeSimilarityScore,
   pickRelevantHttp,
-} from './logic';
+} from './http';

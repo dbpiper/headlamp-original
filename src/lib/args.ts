@@ -115,8 +115,13 @@ const INDEX_STEP = 1 as const;
 export const isTruthy = (value: string): boolean =>
   value === STRING_TRUE || value === STRING_ONE || value === STRING_EMPTY;
 
+const isBooleanLiteralToken = (candidate: string | undefined): boolean => {
+  const lowered = String(candidate ?? '').trim().toLowerCase();
+  return lowered === 'true' || lowered === 'false' || lowered === '1' || lowered === '0';
+};
+
 export const parseActionsFromTokens = (tokens: readonly string[]): readonly Action[] => {
-  const jestOnlyFlags = new Set();
+  const jestOnlyFlags = new Set<string>();
 
   const parseCoverageUiString = (raw: string): 'jest' | 'both' => {
     const normalized = String(raw).toLowerCase();
@@ -133,11 +138,20 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
     ),
 
     // --coverage (enable), and --coverage=true/false
+    rule.when(
+      (value, env) => value === '--coverage' && isBooleanLiteralToken(env.lookahead),
+      (_value, env) => step([ActionBuilders.coverage(isTruthy(String(env.lookahead)))], true),
+    ),
     rule.eq('--coverage', () => step([ActionBuilders.coverage(true)])),
     rule.startsWith('--coverage=', (value) =>
       step([ActionBuilders.coverage(isTruthy((value.split('=')[1] ?? '').trim().toLowerCase()))]),
     ),
     // --coverage.abortOnFailure
+    rule.when(
+      (value, env) => value === '--coverage.abortOnFailure' && isBooleanLiteralToken(env.lookahead),
+      (_value, env) =>
+        step([ActionBuilders.coverageAbortOnFailure(isTruthy(String(env.lookahead)))], true),
+    ),
     rule.eq('--coverage.abortOnFailure', () => step([ActionBuilders.coverageAbortOnFailure(true)])),
     rule.startsWith('--coverage.abortOnFailure=', (value) =>
       step([
@@ -174,6 +188,10 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
       return step([ActionBuilders.coverageDetail(parsed)], true);
     }),
 
+    rule.when(
+      (value, env) => value === '--coverage.showCode' && isBooleanLiteralToken(env.lookahead),
+      (_value, env) => step([ActionBuilders.coverageShowCode(isTruthy(String(env.lookahead)))], true),
+    ),
     rule.eq('--coverage.showCode', () => step([ActionBuilders.coverageShowCode(true)])),
     rule.startsWith('--coverage.showCode=', (value) => {
       const flagValue = (value.split('=')[1] ?? '').trim().toLowerCase();
@@ -218,6 +236,10 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
           : [],
       );
     }),
+    rule.when(
+      (value, env) => value === '--coverage.pageFit' && isBooleanLiteralToken(env.lookahead),
+      (_value, env) => step([ActionBuilders.coveragePageFit(isTruthy(String(env.lookahead)))], true),
+    ),
     rule.eq('--coverage.pageFit', () => step([ActionBuilders.coveragePageFit(true)])),
     rule.startsWith('--coverage.pageFit=', (value) =>
       step([
@@ -229,6 +251,10 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
     ),
 
     // --onlyFailures flag (boolean)
+    rule.when(
+      (value, env) => value === '--onlyFailures' && isBooleanLiteralToken(env.lookahead),
+      (_value, env) => step([ActionBuilders.onlyFailures(isTruthy(String(env.lookahead)))], true),
+    ),
     rule.eq('--onlyFailures', () => step([ActionBuilders.onlyFailures(true)])),
     rule.startsWith('--onlyFailures=', (value) =>
       step([
@@ -240,6 +266,10 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
     ),
 
     // --sequential flag (boolean) → serialize projects and map to jest --runInBand
+    rule.when(
+      (value, env) => value === '--sequential' && isBooleanLiteralToken(env.lookahead),
+      (_value, env) => step([ActionBuilders.sequential(isTruthy(String(env.lookahead)))], true),
+    ),
     rule.eq('--sequential', () => step([ActionBuilders.sequential(true)])),
     rule.startsWith('--sequential=', (value) =>
       step([ActionBuilders.sequential(isTruthy((value.split('=')[1] ?? '').trim().toLowerCase()))]),
@@ -249,6 +279,10 @@ export const parseActionsFromTokens = (tokens: readonly string[]): readonly Acti
     ),
 
     // --showLogs flag (boolean)
+    rule.when(
+      (value, env) => value === '--showLogs' && isBooleanLiteralToken(env.lookahead),
+      (_value, env) => step([ActionBuilders.showLogs(isTruthy(String(env.lookahead)))], true),
+    ),
     rule.eq('--showLogs', () => step([ActionBuilders.showLogs(true)])),
     rule.startsWith('--showLogs=', (value) =>
       step([ActionBuilders.showLogs(isTruthy((value.split('=')[1] ?? '').trim().toLowerCase()))]),
