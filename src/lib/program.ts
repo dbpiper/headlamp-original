@@ -1299,6 +1299,36 @@ export const program = async (): Promise<void> => {
     }
   }
 
+  // If we refined the effective Jest files (rg/http/transitive) but never populated the
+  // per-project ownership map (common when starting with rg-first discovery), we can end up
+  // "starting Jest" but running 0 projects and producing no final rendered output.
+  //
+  // Fix: when selection includes production paths and we have effective Jest files, ensure
+  // perProjectFiltered is populated via ownership filtering.
+  if (
+    selectionHasPaths &&
+    selectionIncludesProdPaths &&
+    effectiveJestFiles.length > 0 &&
+    Array.from(perProjectFiltered.values()).flat().length === 0
+  ) {
+    const perProjectFromEffective = new Map<string, string[]>();
+    for (const cfg of projectConfigs) {
+      // eslint-disable-next-line no-await-in-loop
+      const owned = await filterCandidatesForProject(
+        cfg,
+        jestDiscoveryArgs,
+        effectiveJestFiles,
+        path.dirname(cfg),
+      );
+      perProjectFromEffective.set(cfg, owned as string[]);
+    }
+    perProjectFiltered.clear();
+    for (const [cfg, owned] of perProjectFromEffective.entries()) {
+      perProjectFiltered.set(cfg, owned);
+    }
+    jestFiles = Array.from(perProjectFiltered.values()).flat();
+  }
+
   const jestDecision = decideShouldRunJest([], effectiveJestFiles, {
     selectionSpecified: selectionSpecifiedAugmented,
     selectionPaths: selectionPathsAugmented,
