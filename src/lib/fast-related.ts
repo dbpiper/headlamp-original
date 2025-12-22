@@ -83,18 +83,17 @@ export const findRelatedTestsFast = async (opts: FindRelatedOpts): Promise<reado
     .filter(looksLikeTest);
 
   const uniq = Array.from(new Set(absolute));
-  const results: string[] = [];
-  await Promise.all(
+  const checks = await Promise.all(
     uniq.map(async (absolutePath) => {
       try {
         await fs.access(absolutePath);
-        results.push(absolutePath);
+        return absolutePath;
       } catch {
-        /* ignore */
+        return null;
       }
     }),
   );
-  return results;
+  return checks.filter((p): p is string => typeof p === 'string');
 };
 
 export const cachedRelated = async (opts: {
