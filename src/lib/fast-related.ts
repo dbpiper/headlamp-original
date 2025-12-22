@@ -37,7 +37,7 @@ export const findRelatedTestsFast = async (opts: FindRelatedOpts): Promise<reado
 
   const toSeeds = (abs: string) => {
     const rel = path.relative(repoRoot, abs).replace(/\\/g, '/');
-    const withoutExt = rel.replace(/\.(m?[tj]sx?)$/i, '');
+    const withoutExt = rel.replace(/\.(m?[tj]sx?|c[jt]s)$/i, '');
     const base = path.basename(withoutExt);
     const segs = withoutExt.split('/');
     const tail2 = segs.slice(-TailSegmentCount).join('/');
