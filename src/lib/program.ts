@@ -1370,13 +1370,7 @@ export const program = async (): Promise<void> => {
     const jestRunArgs = selectionIncludesProdPaths
       ? stripPathTokens(jestArgs)
       : selectionHasPaths && selectionLooksLikeTest && (resolvedSelectionTestPaths?.length ?? 0) > 0
-        ? (() => {
-            const base = stripPathTokens(jestArgs);
-            const resolved = (resolvedSelectionTestPaths ?? []).map((absPath) =>
-              path.resolve(absPath).replace(/\\/g, '/'),
-            );
-            return [...base, ...resolved];
-          })()
+        ? stripPathTokens(jestArgs)
         : jestArgs;
     const sanitizedJestRunArgs = jestRunArgs.filter(
       (arg) => !/^--coverageDirectory(?:=|$)/.test(String(arg)),
