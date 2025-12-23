@@ -166,7 +166,9 @@ const collectBaseIdentifiers = (expr: ts.Expression): ReadonlyArray<string> => {
     return collectBaseIdentifiers(expr.expression);
   }
   if (ts.isCallExpression(expr)) {
-    return pipe(expr.arguments, (args) => args.flatMap((arg) => collectBaseIdentifiers(arg)));
+    return pipe([expr.expression, ...expr.arguments], (nodes) =>
+      nodes.flatMap((node) => collectBaseIdentifiers(node as ts.Expression)),
+    );
   }
   if (ts.isArrayLiteralExpression(expr)) {
     return pipe(expr.elements, (elements) =>
@@ -193,6 +195,11 @@ const extractInlineRequireDescriptors = (expr: ts.Expression): ReadonlyArray<Imp
     const local = `__hl_inline_require_${spec}`;
     return [{ local, specifier: spec }];
   }
+  if (ts.isCallExpression(expr)) {
+    return pipe([expr.expression, ...expr.arguments], (nodes) =>
+      nodes.flatMap((node) => extractInlineRequireDescriptors(node as ts.Expression)),
+    );
+  }
   if (ts.isPropertyAccessExpression(expr)) {
     return extractInlineRequireDescriptors(expr.expression);
   }
@@ -208,6 +215,35 @@ const extractInlineRequireDescriptors = (expr: ts.Expression): ReadonlyArray<Imp
     );
   }
   return [];
+};
+
+const exportedRouterIdentifierFromExpression = (expr: ts.Expression): string | undefined => {
+  if (ts.isIdentifier(expr)) {
+    return expr.text;
+  }
+  if (ts.isParenthesizedExpression(expr)) {
+    return exportedRouterIdentifierFromExpression(expr.expression);
+  }
+  if (ts.isArrowFunction(expr)) {
+    if (ts.isIdentifier(expr.body)) {
+      return expr.body.text;
+    }
+    if (ts.isBlock(expr.body)) {
+      const returns = expr.body.statements.filter(ts.isReturnStatement);
+      const first = returns[0];
+      const returned = first?.expression;
+      return returned && ts.isIdentifier(returned) ? returned.text : undefined;
+    }
+    return undefined;
+  }
+  if (ts.isFunctionExpression(expr)) {
+    const body = expr.body;
+    const returns = body.statements.filter(ts.isReturnStatement);
+    const first = returns[0];
+    const returned = first?.expression;
+    return returned && ts.isIdentifier(returned) ? returned.text : undefined;
+  }
+  return undefined;
 };
 
 const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
@@ -283,6 +319,30 @@ const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
       }
     }
 
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      if (
+        ts.isPropertyAccessExpression(node.left) &&
+        ts.isIdentifier(node.left.expression) &&
+        node.left.expression.text === 'module' &&
+        node.left.name.text === 'exports'
+      ) {
+        const exported = exportedRouterIdentifierFromExpression(node.right);
+        if (exported && routerContainers.has(exported)) {
+          exportsRouter = true;
+        }
+      }
+      if (
+        ts.isPropertyAccessExpression(node.left) &&
+        ts.isIdentifier(node.left.expression) &&
+        node.left.expression.text === 'exports'
+      ) {
+        const exported = exportedRouterIdentifierFromExpression(node.right);
+        if (exported && routerContainers.has(exported)) {
+          exportsRouter = true;
+        }
+      }
+    }
+
     if (
       ts.isImportDeclaration(node) &&
       node.moduleSpecifier &&
@@ -318,7 +378,8 @@ const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
     }
 
     if (ts.isExportAssignment(node)) {
-      if (ts.isIdentifier(node.expression) && routerContainers.has(node.expression.text)) {
+      const exported = exportedRouterIdentifierFromExpression(node.expression);
+      if (exported && routerContainers.has(exported)) {
         exportsRouter = true;
       }
     }
