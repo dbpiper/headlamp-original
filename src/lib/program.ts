@@ -1912,17 +1912,9 @@ export const program = async (): Promise<void> => {
               if (!testPath) {
                 continue;
               } // eslint-disable-line no-continue
-              if (obj.type === 'console') {
-                const arr = by.get(testPath) || [];
-                arr.push({ type: obj.level || 'log', message: obj.message || '' });
-                by.set(testPath, arr);
-              } else if (obj.type === 'consoleBatch' && Array.isArray(obj.entries)) {
-                const arr = by.get(testPath) || [];
-                for (const e of obj.entries) {
-                  arr.push({ type: (e && e.type) || 'log', message: (e && e.message) || '' });
-                }
-                by.set(testPath, arr);
-              }
+              const arr = by.get(testPath) || [];
+              arr.push({ message: `[JEST-BRIDGE-EVENT] ${payload}` });
+              by.set(testPath, arr);
             }
             if (isDebug() || showLogs) {
               console.info(

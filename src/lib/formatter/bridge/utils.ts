@@ -434,17 +434,12 @@ export const renderHttpCard = (args: {
       const ms = nearestAbort.durationMs;
       return [
         '  HTTP:',
-        `\n    ${summarizeUrl(nearestAbort.method, nearestAbort.url, nearestAbort.route)} ${ansi.dim('->')} ${ansi.yellow('connection aborted')}`,
-        ms != null ? ` ${ansi.dim(`(${ms}ms)`)} ` : '',
-        '\n',
+        `    ${summarizeUrl(nearestAbort.method, nearestAbort.url, nearestAbort.route)} ${ansi.dim('->')} ${ansi.yellow('connection aborted')}${ms != null ? ` ${ansi.dim(`(${ms}ms)`)} ` : ' '}`,
+        '',
       ];
     }
     return HEADLAMP_HTTP_SHOW_MISS()
-      ? [
-          '  HTTP:',
-          `\n    ${ansi.dim('Transport error; no matching HTTP exchange in window.')}`,
-          '\n',
-        ]
+      ? ['  HTTP:', `    ${ansi.dim('Transport error; no matching HTTP exchange in window.')}`, '']
       : empty;
   }
 
@@ -452,8 +447,8 @@ export const renderHttpCard = (args: {
     return HEADLAMP_HTTP_SHOW_MISS()
       ? [
           '  HTTP:',
-          `\n    ${ansi.dim('No relevant HTTP exchange found. (HEADLAMP_HTTP_MISS=0 to hide)')}`,
-          '\n',
+          `    ${ansi.dim('No relevant HTTP exchange found. (HEADLAMP_HTTP_MISS=0 to hide)')}`,
+          '',
         ]
       : empty;
   }

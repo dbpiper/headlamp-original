@@ -172,6 +172,7 @@
               const method = req.method ? String(req.method) : undefined;
               const url =
                 req.originalUrl || req.url ? String(req.originalUrl || req.url) : undefined;
+              const ctxAtStart = getCtx();
               res.write = function (chunk, enc, cb) {
                 try {
                   const s = asString(chunk);
@@ -188,7 +189,6 @@
                   const preview = chunks.join('').slice(0, MAX);
                   const statusCode =
                     typeof res.statusCode === 'number' ? res.statusCode : undefined;
-                  const ctx = getCtx();
                   emitBridgeEvent({
                     type: 'httpResponse',
                     timestampMs: Date.now(),
@@ -197,7 +197,7 @@
                     url,
                     statusCode,
                     bodyPreview: preview,
-                    ...ctx,
+                    ...ctxAtStart,
                   });
                 } catch {}
                 return end(chunk, enc, cb);
@@ -208,14 +208,13 @@
                     const ended =
                       typeof res.writableEnded === 'boolean' ? res.writableEnded : false;
                     if (!ended) {
-                      const ctx = getCtx();
                       emitBridgeEvent({
                         type: 'httpAbort',
                         timestampMs: Date.now(),
                         durationMs: Math.max(0, Date.now() - startAt),
                         method,
                         url,
-                        ...ctx,
+                        ...ctxAtStart,
                       });
                     }
                   } catch {}
