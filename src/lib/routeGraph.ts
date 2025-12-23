@@ -603,7 +603,14 @@ const buildRouteIndexInternal = async (repoRoot: string): Promise<RouteIndex> =>
   const queue: QueueEntry[] = pipe(fileInfos, (infos) =>
     infos
       .filter((info) => info.appContainers.size > 0)
-      .map((info) => ({ filePath: info.filePath, basePath: '/', kind: 'app' }) as QueueEntry),
+      .map((info) => ({ filePath: info.filePath, basePath: '/', kind: 'app' }) as QueueEntry)
+      .concat(
+        infos
+          .filter((info) => info.exportsRouter)
+          .map(
+            (info) => ({ filePath: info.filePath, basePath: '/', kind: 'router' }) as QueueEntry,
+          ),
+      ),
   );
 
   const httpRouteToSources = new Map<string, Map<string, Set<string>>>();

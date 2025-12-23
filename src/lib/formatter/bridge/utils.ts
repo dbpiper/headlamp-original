@@ -203,6 +203,8 @@ export const parseBridgeConsole = (
         consoleList.push({
           type: String(((evt as any).level as string | undefined) || ''),
           message: String(((evt as any).message as string | undefined) || ''),
+          testPath: (evt as any).testPath as string | undefined,
+          currentTestName: (evt as any).currentTestName as string | undefined,
         });
       } else if (type === 'consoleBatch') {
         try {
