@@ -124,17 +124,18 @@ export const cachedRelated = async (opts: {
   const hit = bag[key];
   if (hit?.length) {
     // Validate cached paths still exist on disk; if any are missing, recompute
-    const existing: string[] = [];
-    await Promise.all(
-      hit.map(async (candidatePath) => {
-        try {
-          await fs.access(candidatePath);
-          existing.push(candidatePath);
-        } catch {
-          // missing → ignore; will trigger recompute below
-        }
-      }),
-    );
+    const existing = (
+      await Promise.all(
+        hit.map(async (candidatePath) => {
+          try {
+            await fs.access(candidatePath);
+            return candidatePath;
+          } catch {
+            return null;
+          }
+        }),
+      )
+    ).filter((p): p is string => typeof p === 'string');
     if (existing.length === hit.length) {
       return existing as readonly string[];
     }

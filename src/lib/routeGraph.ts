@@ -310,11 +310,21 @@ const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
       node.initializer.arguments.length > 0 &&
       ts.isStringLiteral(node.initializer.arguments[0])
     ) {
-      const localName = ts.isIdentifier(node.name) ? readIdentifierText(node.name) : undefined;
-      if (localName) {
-        requireDescriptors.push({
-          local: localName,
-          specifier: readStringLiteralText(node.initializer.arguments[0]) ?? '',
+      const specifier = readStringLiteralText(node.initializer.arguments[0]) ?? '';
+      if (ts.isIdentifier(node.name)) {
+        const localName = readIdentifierText(node.name);
+        if (localName) {
+          requireDescriptors.push({ local: localName, specifier });
+        }
+      }
+      if (ts.isObjectBindingPattern(node.name)) {
+        node.name.elements.forEach((el) => {
+          if (ts.isBindingElement(el) && ts.isIdentifier(el.name)) {
+            const localName = readIdentifierText(el.name) ?? '';
+            if (localName.trim().length > 0) {
+              requireDescriptors.push({ local: localName, specifier });
+            }
+          }
         });
       }
     }
