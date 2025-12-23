@@ -4,7 +4,9 @@
 
 (function setupBridge() {
   try {
-    const print = (payload) => {
+    const originals = {};
+
+    const emitBridgeEvent = (payload) => {
       try {
         const line = `[JEST-BRIDGE-EVENT] ${JSON.stringify(payload)}`;
         (process.stderr || process.stdout).write(`${line}\n`);
@@ -19,15 +21,47 @@
       }
     };
 
+    const inferTestPathFromStack = () => {
+      try {
+        const stack = new Error().stack;
+        if (!stack) return undefined;
+        const lines = String(stack).split('\n');
+        for (const ln of lines) {
+          const m = ln.match(/\(([^()]+):\d+:\d+\)\s*$/) || ln.match(/\bat\s+([^ ]+):\d+:\d+\s*$/);
+          const raw = m && m[1] ? String(m[1]) : '';
+          if (!raw) continue;
+          const file = raw.replace(/\\/g, '/');
+          if (
+            file.includes('/node_modules/') ||
+            file.includes('node:internal') ||
+            file.endsWith('/setup.cjs')
+          ) {
+            // eslint-disable-next-line no-continue
+            continue;
+          }
+          if (file.includes('/tests/') || /\.((test|spec)\.[tj]sx?)$/i.test(file)) {
+            return file;
+          }
+        }
+        return undefined;
+      } catch {
+        return undefined;
+      }
+    };
+
     const getCtx = () => {
       try {
         const st =
           global.expect && typeof global.expect.getState === 'function'
             ? global.expect.getState()
             : {};
-        return { testPath: st.testPath, currentTestName: st.currentTestName };
+        const testPathCandidate =
+          typeof st.testPath === 'string' ? st.testPath : inferTestPathFromStack();
+        const testPath = typeof testPathCandidate === 'string' ? testPathCandidate : '';
+        const currentTestName = typeof st.currentTestName === 'string' ? st.currentTestName : '';
+        return { testPath, currentTestName };
       } catch {
-        return {};
+        return { testPath: '', currentTestName: '' };
       }
     };
 
@@ -35,7 +69,6 @@
     try {
       const g = global;
       const levels = ['log', 'info', 'warn', 'error'];
-      const originals = {};
       const maxEntries = 200;
       const toText = (args) => {
         try {
@@ -58,7 +91,7 @@
               buf.push({ type: lvl, message: msg, ts: Date.now() });
               if (buf.length > maxEntries) buf.splice(0, buf.length - maxEntries);
               const ctx = getCtx();
-              print({ type: 'console', level: lvl, message: msg, ...ctx });
+              emitBridgeEvent({ type: 'console', level: lvl, message: msg, ...ctx });
             } catch {}
             try {
               return originals[lvl](...args);
@@ -75,7 +108,7 @@
       const onRej = (reason) => {
         const e = toErr(reason);
         const c = getCtx();
-        print({
+        emitBridgeEvent({
           type: 'unhandledRejection',
           name: e.name,
           message: e.message,
@@ -87,7 +120,7 @@
       const onExc = (error) => {
         const e = toErr(error);
         const c = getCtx();
-        print({
+        emitBridgeEvent({
           type: 'uncaughtException',
           name: e.name,
           message: e.message,
@@ -156,7 +189,7 @@
                   const statusCode =
                     typeof res.statusCode === 'number' ? res.statusCode : undefined;
                   const ctx = getCtx();
-                  print({
+                  emitBridgeEvent({
                     type: 'httpResponse',
                     timestampMs: Date.now(),
                     durationMs: Math.max(0, Date.now() - startAt),
@@ -176,7 +209,7 @@
                       typeof res.writableEnded === 'boolean' ? res.writableEnded : false;
                     if (!ended) {
                       const ctx = getCtx();
-                      print({
+                      emitBridgeEvent({
                         type: 'httpAbort',
                         timestampMs: Date.now(),
                         durationMs: Math.max(0, Date.now() - startAt),

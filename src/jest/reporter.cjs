@@ -91,6 +91,19 @@ class BridgeReporter {
   }
 
   onTestResult(_test, tr) {
+    const readConsoleEntries = (testResult) => {
+      try {
+        const c = testResult && testResult.console ? testResult.console : null;
+        if (c && typeof c.getBuffer === 'function') {
+          const buf = c.getBuffer();
+          return Array.isArray(buf) ? buf : null;
+        }
+        return Array.isArray(c) ? c : null;
+      } catch {
+        return null;
+      }
+    };
+
     const mapAssertion = (a) => ({
       title: a.title,
       fullName: a.fullName || [...(a.ancestorTitles || []), a.title].join(' '),
@@ -125,7 +138,7 @@ class BridgeReporter {
       failureMessage: tr.failureMessage || '',
       failureDetails: (tr.failureDetails || []).map(sanitizeDetail),
       testExecError: tr.testExecError ? sanitizeError(tr.testExecError) : null,
-      console: tr.console || null,
+      console: readConsoleEntries(tr),
       perfStats: tr.perfStats || {},
       testResults: (tr.testResults || []).map(mapAssertion),
     });

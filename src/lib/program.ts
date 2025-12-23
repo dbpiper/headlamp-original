@@ -1644,6 +1644,8 @@ export const program = async (): Promise<void> => {
         ...(cfg && cfg !== '<default>' ? (['--config', cfg] as const) : ([] as const)),
         '--testLocationInResults',
         ...(namePatternOnlyForDiscovery ? [] : ['--runTestsByPath']),
+        '--setupFilesAfterEnv',
+        setupPath,
         `--reporters=${reporterPath}`,
         '--reporters=default',
         '--colors',
@@ -1677,18 +1679,8 @@ export const program = async (): Promise<void> => {
         FORCE_COLOR: '3',
         TERM: process.env.TERM || 'xterm-256color',
       }) as unknown as NodeJS.ProcessEnv;
-      const mergedNodeOptions = (() => {
-        try {
-          const existing = String(process.env.NODE_OPTIONS || '').trim();
-          const add = `--require ${setupPath}`;
-          return `${existing ? `${existing} ` : ''}${add}`.trim();
-        } catch {
-          return `--require ${setupPath}`;
-        }
-      })();
-      const envWithSetup = { ...baseEnv, NODE_OPTIONS: mergedNodeOptions } as NodeJS.ProcessEnv;
       const { code, output } = await runWithStreaming(jestBin, runArgs, {
-        env: envWithSetup,
+        env: baseEnv,
         onChunk: (text: string) => {
           streamBuf += text;
           const lines = streamBuf.split(/\r?\n/);
