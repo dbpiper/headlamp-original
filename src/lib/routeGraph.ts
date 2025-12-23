@@ -333,6 +333,18 @@ const analyzeRouteFile = async (filePath: string): Promise<FileRouteInfo> => {
       }
       if (
         ts.isPropertyAccessExpression(node.left) &&
+        ts.isPropertyAccessExpression(node.left.expression) &&
+        ts.isIdentifier(node.left.expression.expression) &&
+        node.left.expression.expression.text === 'module' &&
+        node.left.expression.name.text === 'exports'
+      ) {
+        const exported = exportedRouterIdentifierFromExpression(node.right);
+        if (exported && routerContainers.has(exported)) {
+          exportsRouter = true;
+        }
+      }
+      if (
+        ts.isPropertyAccessExpression(node.left) &&
         ts.isIdentifier(node.left.expression) &&
         node.left.expression.text === 'exports'
       ) {
