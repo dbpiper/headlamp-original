@@ -1,4 +1,4 @@
-# Headlamp CLI
+# Headlamp CLI -- Deprecated use https://github.com/dbpiper/headlamp
 
 Coverage-first, runner-agnostic test UX for Jest. Delegates execution to your runner, focuses on better selection and coverage insights.
 
